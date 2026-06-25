@@ -1,0 +1,78 @@
+@{
+    # Hyper-V
+    VMSwitchName       = 'Lab vSwitch'
+    VMPath             = 'D:\Virtual Machines'
+    VHDPath            = 'D:\Virtual Machines'
+    Generation         = 2
+
+    # RHEL 8.10 flash install
+    RHELDvdIso         = 'D:\Source\rhel-8.10-x86_64-dvd.iso'
+    RHELVersion        = '8.10'
+    RootPassword       = 'CHANGE_ME_root_password'
+    Domain             = 'ocplab.net'
+    Gateway            = '10.44.40.1'
+    DnsServers         = @('10.44.40.1', '8.8.8.8')
+    Timezone           = 'Asia/Hong_Kong'
+
+    # Elastic Stack
+    ClusterName        = 'ism-elk-cluster'
+    ElasticVersion     = '8.18.4'
+
+    # All nodes — Hyper-V name, FQDN hostname, IP
+    Nodes = @(
+        @{
+            VMName         = 'ISMELKESNODE01'
+            Hostname       = 'ismelkesnode01'
+            IPAddress      = '10.44.40.31'
+            Role           = 'elasticsearch'
+            MemoryGB       = 8
+            ProcessorCount = 4
+            OSDiskGB       = 127
+            DataDiskGB     = 500
+        },
+        @{
+            VMName         = 'ISMELKESNODE02'
+            Hostname       = 'ismelkesnode02'
+            IPAddress      = '10.44.40.32'
+            Role           = 'elasticsearch'
+            MemoryGB       = 8
+            ProcessorCount = 4
+            OSDiskGB       = 127
+            DataDiskGB     = 500
+        },
+        @{
+            VMName         = 'ISMELKESNODE03'
+            Hostname       = 'ismelkesnode03'
+            IPAddress      = '10.44.40.33'
+            Role           = 'elasticsearch'
+            MemoryGB       = 8
+            ProcessorCount = 4
+            OSDiskGB       = 127
+            DataDiskGB     = 500
+        },
+        @{
+            VMName         = 'ISMELKKBNNODE01'
+            Hostname       = 'ismelkkbnnode01'
+            IPAddress      = '10.44.40.41'
+            Role           = 'kibana'
+            MemoryGB       = 8
+            ProcessorCount = 2
+            OSDiskGB       = 127
+            DataDiskGB     = 0
+        },
+        @{
+            VMName         = 'ISMELKFLNODE01'
+            Hostname       = 'ismelkflnode01'
+            IPAddress      = '10.44.40.42'
+            Role           = 'fleet'
+            MemoryGB       = 8
+            ProcessorCount = 2
+            OSDiskGB       = 127
+            DataDiskGB     = 0
+        }
+    )
+
+    FleetServerPolicyName = 'Fleet-Server-Policy'
+    EsAgentPolicyName     = 'Elastic-Agents-ES'
+    KibanaAgentPolicyName = 'Elastic-Agents-Kibana'
+}

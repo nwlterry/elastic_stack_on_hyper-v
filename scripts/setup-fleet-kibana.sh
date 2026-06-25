@@ -1,0 +1,321 @@
+#!/usr/bin/env bash
+# Configure Fleet in Kibana via API.
+# SETUP_PHASE=fleet-server  — fleet settings + Fleet Server policy only (before install)
+# SETUP_PHASE=agents        — ES/Kibana policies, integrations, enrollment tokens (after 8220 up)
+# SETUP_PHASE=all           — both phases (legacy)
+set -euo pipefail
+
+KIBANA_HOST="${KIBANA_HOST:-10.44.40.41}"
+FLEET_HOST="${FLEET_HOST:-ismelkflnode01.ocplab.net}"
+ELASTIC_USER="${ELASTIC_USER:-elastic}"
+ELASTIC_PASS="${ELASTIC_PASS:-}"
+SETUP_PHASE="${SETUP_PHASE:-all}"
+FLEET_POLICY_NAME="${FLEET_POLICY_NAME:-Fleet-Server-Policy}"
+ES_POLICY_NAME="${ES_POLICY_NAME:-Elastic-Agents-ES}"
+KIBANA_POLICY_NAME="${KIBANA_POLICY_NAME:-Elastic-Agents-Kibana}"
+
+[[ -n "$ELASTIC_PASS" ]] || { echo "Set ELASTIC_PASS" >&2; exit 1; }
+
+http_code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 "http://${KIBANA_HOST}:5601" 2>/dev/null || true)"
+if [[ "$http_code" =~ ^(200|302|401|403)$ ]]; then
+  KB="http://${KIBANA_HOST}:5601"
+elif curl -sk --connect-timeout 3 "https://${KIBANA_HOST}:5601" -o /dev/null -w '%{http_code}' 2>/dev/null | grep -qE '^(200|302|401|403)$'; then
+  KB="https://${KIBANA_HOST}:5601"
+else
+  KB="http://${KIBANA_HOST}:5601"
+fi
+echo "Using Kibana API at ${KB} (phase=${SETUP_PHASE})" >&2
+export KB ELASTIC_USER ELASTIC_PASS FLEET_HOST SETUP_PHASE
+export FLEET_POLICY_NAME ES_POLICY_NAME KIBANA_POLICY_NAME
+
+python3 <<'PY'
+import json, os, time, urllib.error, urllib.request
+
+kb = os.environ["KB"]
+user, pwd = os.environ["ELASTIC_USER"], os.environ["ELASTIC_PASS"]
+fleet_host = os.environ["FLEET_HOST"]
+phase = os.environ.get("SETUP_PHASE", "all")
+do_fleet = phase in ("fleet-server", "all")
+do_agents = phase in ("agents", "all")
+
+
+def api(method, path, body=None, retries=5):
+    import base64
+    import ssl
+
+    global kb
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    last_err = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(
+                kb + path,
+                data=json.dumps(body).encode() if body is not None else None,
+                method=method,
+                headers={"kbn-xsrf": "true", "Content-Type": "application/json"},
+            )
+            req.add_header(
+                "Authorization",
+                "Basic " + base64.b64encode(f"{user}:{pwd}".encode()).decode(),
+            )
+            open_kw = {"timeout": 60}
+            if kb.startswith("https://"):
+                open_kw["context"] = ctx
+            with urllib.request.urlopen(req, **open_kw) as r:
+                raw = r.read().decode()
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code in (409, 400):
+                raise
+            time.sleep(3)
+        except Exception as e:
+            last_err = e
+            err = str(e).lower()
+            if kb.startswith("https://") and "wrong version number" in err:
+                kb = "http://" + kb[len("https://"):]
+                continue
+            time.sleep(3)
+    raise last_err
+
+
+def list_policies():
+    return api("GET", "/api/fleet/agent_policies").get("items", [])
+
+
+def find_policy(name):
+    for p in list_policies():
+        if p.get("name") == name:
+            return p
+    return None
+
+
+def ensure_policy(name, desc, fleet_server=False):
+    existing = find_policy(name)
+    if existing:
+        return existing["id"]
+    body = {
+        "name": name,
+        "description": desc,
+        "namespace": "default",
+        "monitoring_enabled": ["logs", "metrics"],
+    }
+    if fleet_server:
+        body["has_fleet_server"] = True
+        body["is_default_fleet_server"] = True
+    try:
+        r = api("POST", "/api/fleet/agent_policies", body)
+        return r["item"]["id"]
+    except urllib.error.HTTPError as e:
+        if e.code == 409:
+            existing = find_policy(name)
+            if existing:
+                return existing["id"]
+        raise
+
+
+def configure_fleet_hosts():
+    fleet_url = f"https://{fleet_host}:8220"
+    try:
+        api("PUT", "/api/fleet/settings", {
+            "fleet_server_hosts": [fleet_url],
+            "prerelease_integrations_enabled": False,
+        })
+    except Exception:
+        pass
+    try:
+        hosts = api("GET", "/api/fleet/fleet_server_hosts").get("items", [])
+        for h in hosts:
+            try:
+                api("DELETE", f"/api/fleet/fleet_server_hosts/{h['id']}")
+            except Exception:
+                pass
+        api("POST", "/api/fleet/fleet_server_hosts", {
+            "name": "default-fleet-server",
+            "host_urls": [fleet_url],
+            "is_default": True,
+        })
+    except Exception:
+        pass
+
+
+def list_package_policies(policy_id):
+    return api("GET", "/api/fleet/package_policies?perPage=200").get("items", [])
+
+
+def find_package_policy(policy_id, package_name):
+    for p in list_package_policies(policy_id):
+        if p.get("policy_id") == policy_id and p.get("package", {}).get("name") == package_name:
+            return p
+    return None
+
+
+def latest_package_version(package_name):
+    try:
+        r = api("GET", f"/api/fleet/epm/packages/{package_name}")
+        return r["item"]["version"]
+    except Exception:
+        pkgs = api("GET", f"/api/fleet/epm/packages/{package_name}").get("items", [])
+        if pkgs:
+            return pkgs[0]["version"]
+        return "latest"
+
+
+def safe_integration(label, fn):
+    try:
+        fn()
+        print(f"INTEGRATION_OK={label}", flush=True)
+    except Exception as exc:
+        detail = getattr(exc, "read", lambda: b"")()
+        if detail:
+            try:
+                detail = detail.decode()
+            except Exception:
+                detail = str(detail)
+        else:
+            detail = str(exc)
+        print(f"INTEGRATION_WARN={label}:{detail[:500]}", flush=True)
+
+
+def ensure_fleet_server_integration(policy_id):
+    if find_package_policy(policy_id, "fleet_server"):
+        return
+    ver = latest_package_version("fleet_server")
+    api("POST", "/api/fleet/package_policies", {
+        "name": "fleet_server-1",
+        "description": "Fleet Server",
+        "namespace": "default",
+        "policy_id": policy_id,
+        "enabled": True,
+        "package": {"name": "fleet_server", "version": ver},
+        "inputs": [
+            {
+                "type": "fleet-server",
+                "policy_template": "fleet_server",
+                "enabled": True,
+            },
+        ],
+    })
+
+
+def ensure_system_integration(policy_id, label):
+    if find_package_policy(policy_id, "system"):
+        return
+    ver = latest_package_version("system")
+    api("POST", "/api/fleet/package_policies", {
+        "name": f"{label}-system",
+        "description": "System logs and metrics",
+        "namespace": "default",
+        "policy_id": policy_id,
+        "enabled": True,
+        "package": {"name": "system", "version": ver},
+        "inputs": {
+            "system-metrics": {
+                "enabled": True,
+                "streams": {
+                    "system.cpu": {"enabled": True},
+                    "system.memory": {"enabled": True},
+                    "system.network": {"enabled": True},
+                    "system.diskio": {"enabled": True},
+                    "system.load": {"enabled": True},
+                    "system.filesystem": {"enabled": True},
+                    "system.uptime": {"enabled": True},
+                },
+            },
+            "system-logs": {
+                "enabled": True,
+                "streams": {
+                    "system.syslog": {
+                        "enabled": True,
+                        "vars": {"paths": ["/var/log/messages", "/var/log/syslog"]},
+                    },
+                    "system.auth": {
+                        "enabled": True,
+                        "vars": {"paths": ["/var/log/secure", "/var/log/auth.log"]},
+                    },
+                },
+            },
+        },
+    })
+
+
+def ensure_elasticsearch_integration(policy_id):
+    if find_package_policy(policy_id, "elasticsearch"):
+        return
+    ver = latest_package_version("elasticsearch")
+    api("POST", "/api/fleet/package_policies", {
+        "name": "es-node-elasticsearch",
+        "description": "Elasticsearch metrics",
+        "namespace": "default",
+        "policy_id": policy_id,
+        "enabled": True,
+        "package": {"name": "elasticsearch", "version": ver},
+        "inputs": {
+            "elasticsearch-metrics": {
+                "enabled": True,
+                "vars": {
+                    "hosts": ["https://localhost:9200"],
+                    "scope": "node",
+                },
+                "streams": {
+                    "elasticsearch.stack_monitoring.node_stats": {"enabled": True},
+                    "elasticsearch.stack_monitoring.index_stats": {"enabled": True},
+                },
+            },
+        },
+    })
+
+
+def ensure_kibana_integration(policy_id):
+    if find_package_policy(policy_id, "kibana"):
+        return
+    ver = latest_package_version("kibana")
+    api("POST", "/api/fleet/package_policies", {
+        "name": "kibana-node-kibana",
+        "description": "Kibana metrics",
+        "namespace": "default",
+        "policy_id": policy_id,
+        "enabled": True,
+        "package": {"name": "kibana", "version": ver},
+        "inputs": {
+            "kibana-metrics": {
+                "enabled": True,
+                "vars": {"hosts": ["http://localhost:5601"]},
+                "streams": {
+                    "kibana.stack_monitoring.stats": {"enabled": True},
+                },
+            },
+        },
+    })
+
+
+def enroll_token(policy_id):
+    r = api("POST", "/api/fleet/enrollment-api-keys", {"policy_id": policy_id})
+    return r["item"]["api_key"]
+
+
+fleet_id = None
+if do_fleet:
+    configure_fleet_hosts()
+    fleet_id = ensure_policy(os.environ["FLEET_POLICY_NAME"], "Fleet Server", fleet_server=True)
+    safe_integration("fleet-server", lambda: ensure_fleet_server_integration(fleet_id))
+    print(f"FLEET_POLICY_ID={fleet_id}")
+
+es_id = kb_id = None
+if do_agents:
+    configure_fleet_hosts()
+    es_id = ensure_policy(os.environ["ES_POLICY_NAME"], "ES node agents")
+    kb_id = ensure_policy(os.environ["KIBANA_POLICY_NAME"], "Kibana node agent")
+
+    safe_integration("es-system", lambda: ensure_system_integration(es_id, "es"))
+    safe_integration("es-elasticsearch", lambda: ensure_elasticsearch_integration(es_id))
+    safe_integration("kibana-system", lambda: ensure_system_integration(kb_id, "kibana"))
+    safe_integration("kibana-kibana", lambda: ensure_kibana_integration(kb_id))
+
+    print(f"ES_POLICY_ID={es_id}")
+    print(f"KIBANA_POLICY_ID={kb_id}")
+    print(f"ES_ENROLLMENT_TOKEN={enroll_token(es_id)}")
+    print(f"KIBANA_ENROLLMENT_TOKEN={enroll_token(kb_id)}")
+PY

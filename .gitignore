@@ -1,0 +1,25 @@
+# Secrets — copy config.psd1.example to config.psd1 locally
+config.psd1
+kickstart/generated/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Large offline packages (download separately)
+packages/
+*.tar.gz
+*.rpm
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
