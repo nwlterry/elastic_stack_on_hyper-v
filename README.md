@@ -1,0 +1,1 @@
+# elastic_stack_on_hyper-v
