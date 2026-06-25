@@ -72,11 +72,26 @@ wait_for_cluster_ready() {
   return 1
 }
 
+ELASTIC_PASSWORD_FILE="/root/.elastic-stack/elastic-password"
+
+save_elastic_password() {
+  local pw="$1"
+  mkdir -p "$(dirname "$ELASTIC_PASSWORD_FILE")"
+  printf '%s\n' "$pw" > "$ELASTIC_PASSWORD_FILE"
+  chmod 600 "$ELASTIC_PASSWORD_FILE"
+  echo "Saved elastic password to ${ELASTIC_PASSWORD_FILE}"
+}
+
 reset_elastic_password() {
   local attempt=0
   while (( attempt < 20 )); do
     local out=""
     if out=$("$ES_BIN/elasticsearch-reset-password" -u elastic -b 2>&1); then
+      local pw=""
+      pw=$(echo "$out" | sed -n 's/.*New value: \([^[:space:]]*\).*/\1/p')
+      if [[ -n "$pw" ]]; then
+        save_elastic_password "$pw"
+      fi
       echo "$out"
       return 0
     fi

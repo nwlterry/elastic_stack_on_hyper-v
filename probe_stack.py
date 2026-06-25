@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Quick probe of ELK stack SSH + Fleet state."""
-import json
 import re
 import shlex
 from pathlib import Path
 
 import paramiko
+
+from deploy_ordered_stack import NODES, connect, get_elastic_password
 
 ROOT = Path(__file__).parent
 PWD = re.search(r"RootPassword\s*=\s*'([^']+)'", (ROOT / "config.psd1").read_text()).group(1)
@@ -35,16 +36,12 @@ for name, ip in IPS.items():
     except Exception as exc:
         print(f"{name} {ip}: FAIL {exc}")
 
-print("\n=== ES elastic password probe ===")
+print("\n=== ES elastic password (read-only) ===")
 try:
-    out = ssh(IPS["es01"], "/usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -b 2>&1", timeout=120)
-    m = re.search(r"New (?:password|value):\s*(\S+)", out)
-    if m:
-        elastic = m.group(1)
-        print(f"elastic={elastic}")
-    else:
-        print(out[-500:])
-        raise SystemExit(1)
+    es = connect(NODES["es01"][0])
+    elastic = get_elastic_password(es)
+    es.close()
+    print("elastic password loaded (see secrets/elastic-password or: python show_elastic_password.py)")
 except Exception as exc:
     print(f"FAIL {exc}")
     raise SystemExit(1)

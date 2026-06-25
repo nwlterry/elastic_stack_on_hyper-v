@@ -56,6 +56,7 @@ foreach ($n in $c.Nodes) {{
     Timezone = $c.Timezone
     ClusterName = $c.ClusterName
     ElasticVersion = $c.ElasticVersion
+    ElasticPassword = $c.ElasticPassword
     Nodes = $nodes
     FleetServerPolicyName = $c.FleetServerPolicyName
     EsAgentPolicyName = $c.EsAgentPolicyName
@@ -128,6 +129,7 @@ def _load_via_regex(path: Path) -> dict[str, Any]:
         "Timezone": scalar("Timezone", "Asia/Hong_Kong"),
         "ClusterName": scalar("ClusterName", "ism-elk-cluster"),
         "ElasticVersion": scalar("ElasticVersion", "8.18.4"),
+        "ElasticPassword": scalar("ElasticPassword"),
         "Nodes": nodes,
         "FleetServerPolicyName": scalar("FleetServerPolicyName", "Fleet-Server-Policy"),
         "EsAgentPolicyName": scalar("EsAgentPolicyName", "Elastic-Agents-ES"),

@@ -193,7 +193,7 @@ def main() -> int:
     es = connect(NODES["es01"][0])
     elastic_pwd = get_elastic_password(es)
     es.close()
-    print(f"elastic={elastic_pwd}", flush=True)
+    print("elastic password loaded from stored credentials", flush=True)
 
     if not wait_kibana_stable(kb_ip, elastic_pwd=elastic_pwd):
         print("Kibana not stable", flush=True)

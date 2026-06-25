@@ -17,6 +17,8 @@ import paramiko
 from scp import SCPClient
 
 from config_loader import EPR_PACKAGES, build_deploy_context, ensure_config
+from elastic_credentials import get_elastic_password as _resolve_elastic_password
+from elastic_credentials import reset_elastic_password as _reset_elastic_password
 
 ROOT = Path(__file__).parent
 SCRIPTS = ROOT / "scripts"
@@ -194,13 +196,13 @@ def wait_es_api(c):
 
 
 def get_elastic_password(c) -> str:
-    for _ in range(20):
-        out = run(c, "/usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic -b 2>&1", check=False, timeout=120)
-        m = re.search(r"New (?:password|value):\s*(\S+)", out)
-        if m:
-            return m.group(1)
-        time.sleep(12)
-    raise RuntimeError("Could not obtain elastic password")
+    """Read stored elastic password; never resets."""
+    return _resolve_elastic_password(c, run)
+
+
+def reset_elastic_password(c) -> str:
+    """Reset elastic password once and persist to secrets/ + ES01."""
+    return _reset_elastic_password(c, run)
 
 
 def ensure_es_node(ip: str, fqdn: str):
@@ -287,7 +289,11 @@ def bootstrap_es_cluster() -> str:
     if "active" not in run(c, "systemctl is-active elasticsearch 2>&1", check=False):
         run(c, f"NODE_IP={ES_PRIMARY_IP} bash {REMOTE}/fix-es-bootstrap.sh", timeout=300)
         wait_es_api(c)
-    elastic_pwd = get_elastic_password(c)
+    try:
+        elastic_pwd = get_elastic_password(c)
+    except RuntimeError:
+        print("  no stored elastic password — resetting once and saving", flush=True)
+        elastic_pwd = reset_elastic_password(c)
 
     health = run(
         c,

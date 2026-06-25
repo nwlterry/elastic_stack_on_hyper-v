@@ -1,5 +1,7 @@
 # Secrets — copy config.psd1.example to config.psd1 locally
 config.psd1
+secrets/*
+!secrets/elastic-password.example
 kickstart/generated/
 
 # Python

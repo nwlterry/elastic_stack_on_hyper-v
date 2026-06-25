@@ -18,6 +18,9 @@
     # Elastic Stack
     ClusterName        = 'ism-elk-cluster'
     ElasticVersion     = '8.18.4'
+    # Optional: set after first bootstrap (or use secrets/elastic-password locally).
+    # Scripts never reset this unless you run reset_elastic_password.py.
+    ElasticPassword    = 'CHANGE_ME_elastic_password'
 
     # All nodes — Hyper-V name, FQDN hostname, IP
     Nodes = @(
