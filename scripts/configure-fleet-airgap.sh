@@ -21,28 +21,46 @@ set_yaml() {
 
 cp -a "$KIBANA_YML" "${KIBANA_YML}.bak.airgap.$(date +%Y%m%d%H%M%S)"
 
-# Do not set xpack.fleet.agents.elasticsearch.* when xpack.fleet.outputs is already defined.
 set_yaml "xpack.fleet.isAirGapped" "true"
 set_yaml "xpack.fleet.registryUrl" "\"http://127.0.0.1:8080\""
 if ! grep -q '^xpack\.fleet\.agents\.fleet_server\.hosts:' "$KIBANA_YML"; then
   set_yaml "xpack.fleet.agents.fleet_server.hosts" "[\"https://${FLEET_HOST}:8220\"]"
 fi
-# Remove conflicting legacy keys if a previous run added them.
 sed -i '/^xpack\.fleet\.agents\.elasticsearch\.hosts:/d' "$KIBANA_YML"
 sed -i '/^xpack\.fleet\.agents\.elasticsearch\.ca_sha256:/d' "$KIBANA_YML"
 
-# Install bundled packages at startup (no epr.elastic.co).
-if ! grep -q '^xpack\.fleet\.packages:' "$KIBANA_YML"; then
-  cat >> "$KIBANA_YML" <<'EOF'
-xpack.fleet.packages:
+# Replace any existing xpack.fleet.packages block with the full air-gap set.
+python3 <<'PY'
+from pathlib import Path
+
+path = Path("/etc/kibana/kibana.yml")
+lines = path.read_text().splitlines()
+out = []
+skip = False
+for line in lines:
+    if line.startswith("xpack.fleet.packages:"):
+        skip = True
+        continue
+    if skip:
+        if line.startswith("  - ") or line.startswith("    "):
+            continue
+        skip = False
+    out.append(line)
+
+block = """xpack.fleet.packages:
   - name: fleet_server
     version: 1.6.0
   - name: elastic_agent
     version: 2.3.0
-EOF
-fi
-
-
+  - name: system
+    version: 1.60.0
+  - name: elasticsearch
+    version: 1.12.0
+  - name: kibana
+    version: 1.11.0"""
+out.append(block)
+path.write_text("\n".join(out) + "\n")
+PY
 
 if [[ -f "$ES_CA_FILE" ]]; then
   mkdir -p /etc/kibana/certs
@@ -52,7 +70,7 @@ if [[ -f "$ES_CA_FILE" ]]; then
 fi
 
 echo "Fleet air-gap settings applied to ${KIBANA_YML}"
-grep -E '^xpack\.fleet\.(isAirGapped|agents\.)' "$KIBANA_YML" || true
+grep -E '^xpack\.fleet\.(isAirGapped|registryUrl|packages)' "$KIBANA_YML" || true
 
 systemctl restart kibana
 echo "Kibana restarted; waiting for /api/status..."

@@ -28,9 +28,11 @@ See **[DEPLOYMENT_STATUS.md](DEPLOYMENT_STATUS.md)** for the latest verified sta
 ### 1. Configuration
 
 ```powershell
-Copy-Item config.psd1.example config.psd1
-# Edit config.psd1: RootPassword, paths, IPs
+python init_config.py
+# Or: Copy-Item config.psd1.example config.psd1  then edit manually
 ```
+
+`init_config.py` prompts for domain, hostname, IP, disk size, and OS root password on first run and writes `config.psd1`.
 
 `config.psd1` is gitignored — never commit real passwords.
 

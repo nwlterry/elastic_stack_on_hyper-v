@@ -8,6 +8,7 @@
     # RHEL 8.10 flash install
     RHELDvdIso         = 'D:\Source\rhel-8.10-x86_64-dvd.iso'
     RHELVersion        = '8.10'
+    # First run: python init_config.py  (prompts for domain, IPs, disks, root password)
     RootPassword       = 'CHANGE_ME_root_password'
     Domain             = 'ocplab.net'
     Gateway            = '10.44.40.1'

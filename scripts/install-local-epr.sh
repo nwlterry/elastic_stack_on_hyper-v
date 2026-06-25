@@ -15,6 +15,7 @@ After=network.target
 Type=simple
 ExecStart=/usr/bin/python3 ${SCRIPT_DIR}/local-epr-server.py
 Environment=EPR_PORT=${EPR_PORT}
+Environment=EPR_PACKAGES=/opt/elastic-setup/epr-packages
 Restart=always
 RestartSec=5
 

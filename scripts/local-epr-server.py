@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Minimal Elastic Package Registry for air-gapped Kibana (bundled zips)."""
+"""Minimal Elastic Package Registry for air-gapped Kibana."""
 import json
 import mimetypes
 import os
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+EPR_DIR = os.environ.get("EPR_PACKAGES", "/opt/elastic-setup/epr-packages")
 BUNDLED = "/usr/share/kibana/node_modules/@kbn/fleet-plugin/target/bundled_packages"
 PORT = int(os.environ.get("EPR_PORT", "8080"))
 
@@ -27,22 +28,25 @@ PACKAGES = {
     "system": {
         "title": "System",
         "version": "1.60.0",
-        "description": "System logs and metrics (stub for deploy).",
-        "policy_templates": [{"name": "system", "title": "System", "description": "System"}],
+        "description": "System logs and metrics.",
+        "policy_templates": [
+            {"name": "metrics", "title": "Metrics", "description": "System metrics"},
+            {"name": "logs", "title": "Logs", "description": "System logs"},
+        ],
         "categories": ["observability"],
     },
     "elasticsearch": {
         "title": "Elasticsearch",
         "version": "1.12.0",
-        "description": "Elasticsearch metrics (stub for deploy).",
-        "policy_templates": [],
+        "description": "Elasticsearch metrics.",
+        "policy_templates": [{"name": "elasticsearch", "title": "Elasticsearch", "description": "Elasticsearch"}],
         "categories": ["observability"],
     },
     "kibana": {
         "title": "Kibana",
         "version": "1.11.0",
-        "description": "Kibana metrics (stub for deploy).",
-        "policy_templates": [],
+        "description": "Kibana metrics.",
+        "policy_templates": [{"name": "kibana", "title": "Kibana", "description": "Kibana"}],
         "categories": ["observability"],
     },
 }
@@ -66,6 +70,17 @@ def package_entry(name, meta):
     }
 
 
+def resolve_zip(rel_path: str) -> str | None:
+    base = os.path.basename(rel_path)
+    for directory in (EPR_DIR, BUNDLED):
+        if not directory:
+            continue
+        fpath = os.path.join(directory, base)
+        if os.path.isfile(fpath):
+            return fpath
+    return None
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}", flush=True)
@@ -83,10 +98,10 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(200, [])
             return
-        if parsed.path.startswith("/epr/"):
-            rel = parsed.path[len("/epr/") :]
-            fpath = os.path.join(BUNDLED, os.path.basename(rel))
-            if os.path.isfile(fpath):
+        if parsed.path.startswith("/epr/") or parsed.path.startswith("/download/"):
+            rel = parsed.path.split("/epr/", 1)[-1] if "/epr/" in parsed.path else parsed.path.split("/download/", 1)[-1]
+            fpath = resolve_zip(rel)
+            if fpath:
                 self._file(200, fpath)
                 return
         self.send_error(404)
@@ -111,8 +126,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    os.makedirs(EPR_DIR, exist_ok=True)
     httpd = HTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"Local EPR listening on http://127.0.0.1:{PORT}", flush=True)
+    print(f"Local EPR listening on http://127.0.0.1:{PORT} (packages={EPR_DIR})", flush=True)
     httpd.serve_forever()
 
 

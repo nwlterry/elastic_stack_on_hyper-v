@@ -16,15 +16,29 @@ from pathlib import Path
 import paramiko
 from scp import SCPClient
 
+from config_loader import EPR_PACKAGES, build_deploy_context, ensure_config
+
 ROOT = Path(__file__).parent
 SCRIPTS = ROOT / "scripts"
 REMOTE = "/opt/elastic-setup"
-VERSION = "8.18.4"
-CLUSTER = "ism-elk-cluster"
-DOMAIN = "ocplab.net"
-FLEET_VM = "ISMELKFLNODE01"
-KIBANA_VM = "ISMELKKBNNODE01"
-FLEET_MEMORY_GB = 8
+
+_ctx = build_deploy_context(ensure_config())
+DOMAIN = _ctx["DOMAIN"]
+CLUSTER = _ctx["CLUSTER"]
+VERSION = _ctx["VERSION"]
+PASSWORD = os.environ.get("SSH_PASS") or _ctx["PASSWORD"]
+FLEET_VM = _ctx["FLEET_VM"]
+KIBANA_VM = _ctx["KIBANA_VM"]
+FLEET_MEMORY_GB = _ctx["FLEET_MEMORY_GB"]
+FLEET_POLICY_NAME = _ctx["FLEET_POLICY_NAME"]
+ES_POLICY_NAME = _ctx["ES_POLICY_NAME"]
+KIBANA_POLICY_NAME = _ctx["KIBANA_POLICY_NAME"]
+NODES = _ctx["NODES"]
+ES_NODES = _ctx["ES_NODES"]
+ES_PRIMARY_IP = _ctx["ES_PRIMARY_IP"]
+ES_PRIMARY_FQDN = _ctx["ES_PRIMARY_FQDN"]
+VM_NAMES = _ctx["VM_NAMES"]
+os.environ["SSH_PASS"] = PASSWORD
 
 AGENT_CLEANUP = (
     "pkill -9 -f install-fleet-server 2>/dev/null; "
@@ -36,27 +50,12 @@ AGENT_CLEANUP = (
     "systemctl disable elastic-agent 2>/dev/null; "
     "command -v elastic-agent >/dev/null && elastic-agent uninstall --force 2>/dev/null; "
     "/opt/Elastic/Agent/elastic-agent uninstall --force 2>/dev/null; "
-    "rpm -e elastic-agent-8.18.4 2>/dev/null; "
+    f"rpm -e elastic-agent-{VERSION} 2>/dev/null; "
     "rm -f /etc/systemd/system/elastic-agent.service; "
     "rm -rf /etc/systemd/system/elastic-agent.service.d; "
     "systemctl daemon-reload 2>/dev/null; "
     "rm -rf /opt/Elastic /var/lib/elastic-agent /etc/elastic-agent; true"
 )
-
-_cfg = (ROOT / "config.psd1").read_text()
-PASSWORD = os.environ.get("SSH_PASS") or re.search(
-    r"RootPassword\s*=\s*'([^']+)'", _cfg
-).group(1)
-os.environ["SSH_PASS"] = PASSWORD
-
-NODES = {
-    "es01": ("10.44.40.31", f"ismelkesnode01.{DOMAIN}"),
-    "es02": ("10.44.40.32", f"ismelkesnode02.{DOMAIN}"),
-    "es03": ("10.44.40.33", f"ismelkesnode03.{DOMAIN}"),
-    "kibana": ("10.44.40.41", f"ismelkkbnnode01.{DOMAIN}"),
-    "fleet": ("10.44.40.42", f"ismelkflnode01.{DOMAIN}"),
-}
-ES_NODES = [NODES["es01"], NODES["es02"], NODES["es03"]]
 
 
 def curl_elastic_auth(elastic_pwd: str) -> str:
@@ -112,6 +111,12 @@ def copy_scripts(c, roles: tuple[str, ...] = ("elasticsearch", "kibana", "elasti
             scp.put(str(f), f"{REMOTE}/{f.name}")
         pkg = ROOT / "packages"
         if pkg.is_dir():
+            epr_local = pkg / "epr"
+            if epr_local.is_dir() and "kibana" in roles:
+                run(c, f"mkdir -p {REMOTE}/epr-packages {REMOTE}/packages/epr", check=False)
+                for f in epr_local.glob("*.zip"):
+                    scp.put(str(f), f"{REMOTE}/epr-packages/{f.name}")
+                    scp.put(str(f), f"{REMOTE}/packages/epr/{f.name}")
             for f in pkg.iterdir():
                 if not f.is_file():
                     continue
@@ -215,11 +220,51 @@ def ensure_es_node(ip: str, fqdn: str):
     c.close()
 
 
+def ensure_fleet_epr_ready(elastic_pwd: str) -> None:
+    """Stage integration zips, start local EPR, and configure Kibana air-gap packages."""
+    print("=== Fleet EPR: stage packages + air-gap ===", flush=True)
+    kb_ip = NODES["kibana"][0]
+    if not wait_kibana_stable(kb_ip, elastic_pwd=elastic_pwd):
+        raise RuntimeError("Kibana must be stable before Fleet EPR setup")
+
+    c = connect(kb_ip)
+    copy_scripts(c, roles=("kibana",))
+    run(c, f"bash {REMOTE}/stage-epr-packages.sh", timeout=900, check=False)
+    run(c, f"bash {REMOTE}/install-local-epr.sh", timeout=120)
+    run(
+        c,
+        f"FLEET_HOST={NODES['fleet'][1]} bash {REMOTE}/configure-fleet-airgap.sh",
+        timeout=600,
+    )
+    auth = curl_elastic_auth(elastic_pwd)
+    required = list(EPR_PACKAGES.keys())
+    for i in range(40):
+        installed = run(
+            c,
+            f"curl -s -u {auth} -H 'kbn-xsrf:true' "
+            f"http://127.0.0.1:5601/api/fleet/epm/packages/installed | "
+            f"python3 -c \"import sys,json; d=json.load(sys.stdin); "
+            f"print(','.join(sorted(p.get('name','') for p in d.get('items',[]))))\"",
+            check=False,
+            timeout=60,
+        ).strip()
+        have = set(installed.split(",")) if installed else set()
+        if all(p in have for p in required):
+            print(f"  EPR packages installed: {installed}", flush=True)
+            c.close()
+            return
+        if i % 3 == 0:
+            print(f"  EPR poll {i}: installed={installed}", flush=True)
+        time.sleep(15)
+    c.close()
+    print("  WARN: not all EPR packages installed yet — integrations may fail", flush=True)
+
+
 def bootstrap_es_cluster() -> str:
     print("=== Phase 1: Elasticsearch cluster (3 nodes) ===", flush=True)
-    ensure_vm_running("ISMELKESNODE01", 15)
-    ensure_vm_running("ISMELKESNODE02", 15)
-    ensure_vm_running("ISMELKESNODE03", 15)
+    for key in ("es01", "es02", "es03"):
+        if key in VM_NAMES:
+            ensure_vm_running(VM_NAMES[key], 15)
 
     for ip, fqdn in ES_NODES:
         ensure_es_node(ip, fqdn)
@@ -228,7 +273,7 @@ def bootstrap_es_cluster() -> str:
     c = connect(ip)
     copy_scripts(c, roles=("elasticsearch",))
     if "active" not in run(c, "systemctl is-active elasticsearch 2>&1", check=False):
-        run(c, f"NODE_IP=10.44.40.31 bash {REMOTE}/fix-es-bootstrap.sh", timeout=300)
+        run(c, f"NODE_IP={ES_PRIMARY_IP} bash {REMOTE}/fix-es-bootstrap.sh", timeout=300)
         wait_es_api(c)
     elastic_pwd = get_elastic_password(c)
 
@@ -357,13 +402,13 @@ def deploy_kibana(elastic_pwd: str):
     if "YES" not in run(c, f"rpm -q kibana-{VERSION} 2>/dev/null && echo YES || echo NO", check=False):
         run(
             c,
-            f"bash {REMOTE}/install-kibana.sh --version {VERSION} --es-host 10.44.40.31 "
+            f"bash {REMOTE}/install-kibana.sh --version {VERSION} --es-host {ES_PRIMARY_IP} "
             f"--enrollment-token '{kibana_t}'",
         )
     run(c, f"bash {REMOTE}/configure-kibana-security.sh", timeout=120)
     run(
         c,
-        f"ELASTIC_PASS={shlex.quote(elastic_pwd)} ES_HOST=ismelkesnode01.{DOMAIN} "
+        f"ELASTIC_PASS={shlex.quote(elastic_pwd)} ES_HOST={ES_PRIMARY_FQDN} "
         f"bash {REMOTE}/enable-stack-monitoring.sh",
         timeout=120,
     )
@@ -395,6 +440,9 @@ def _run_fleet_setup(elastic_pwd: str, phase: str) -> dict:
     out = run(
         c,
         f"ELASTIC_PASS={shlex.quote(elastic_pwd)} FLEET_HOST={fleet_host} "
+        f"FLEET_POLICY_NAME={shlex.quote(FLEET_POLICY_NAME)} "
+        f"ES_POLICY_NAME={shlex.quote(ES_POLICY_NAME)} "
+        f"KIBANA_POLICY_NAME={shlex.quote(KIBANA_POLICY_NAME)} "
         f"SETUP_PHASE={phase} bash {REMOTE}/setup-fleet-kibana.sh",
         timeout=600,
     )
@@ -417,6 +465,7 @@ def setup_agent_policies(elastic_pwd: str) -> dict:
     if not wait_fleet_server_ready(fleet_ip):
         raise RuntimeError("Fleet Server must be enrolled before agent policy setup")
 
+    ensure_fleet_epr_ready(elastic_pwd)
     result = _run_fleet_setup(elastic_pwd, "agents")
     if not result.get("ES_ENROLLMENT_TOKEN") or not result.get("KIBANA_ENROLLMENT_TOKEN"):
         raise RuntimeError("Agent policy / enrollment token setup failed")
@@ -622,7 +671,8 @@ def verify_stack(elastic_pwd: str):
     c.close()
 
     c = connect(NODES["kibana"][0])
-    print(run(c, "curl -s -o /dev/null -w 'kibana_http:%{http_code}\n' http://10.44.40.41:5601", check=False))
+    kb_ip = NODES["kibana"][0]
+    print(run(c, f"curl -s -o /dev/null -w 'kibana_http:%{{http_code}}\n' http://{kb_ip}:5601", check=False))
     print(
         run(
             c,
@@ -643,13 +693,7 @@ def main():
     update_local_hosts()
     cleanup_fleet_install()
 
-    vm_by_ip = {
-        NODES["es01"][0]: "ISMELKESNODE01",
-        NODES["es02"][0]: "ISMELKESNODE02",
-        NODES["es03"][0]: "ISMELKESNODE03",
-        NODES["kibana"][0]: KIBANA_VM,
-        NODES["fleet"][0]: FLEET_VM,
-    }
+    vm_by_ip = {ip: vm for key, (ip, _) in NODES.items() if (vm := VM_NAMES.get(key))}
     for ip, fqdn in NODES.values():
         c = connect_if_running(ip, vm_by_ip.get(ip), attempts=6)
         if not c:
@@ -674,9 +718,9 @@ def main():
 
     print("\n" + "=" * 60)
     print("ORDERED DEPLOY COMPLETE")
-    print(f"  ES:     https://ismelkesnode01.{DOMAIN}:9200  (3 nodes, green)")
-    print(f"  Kibana: http://10.44.40.41:5601")
-    print(f"  Fleet:  https://ismelkflnode01.{DOMAIN}:8220  (VM {FLEET_MEMORY_GB}GB, MemoryMax=8G)")
+    print(f"  ES:     https://{ES_PRIMARY_FQDN}:9200  ({len(ES_NODES)} nodes, green)")
+    print(f"  Kibana: http://{NODES['kibana'][0]}:5601")
+    print(f"  Fleet:  https://{NODES['fleet'][1]}:8220  (VM {FLEET_MEMORY_GB}GB, MemoryMax=8G)")
     print(f"  elastic: {elastic_pwd}")
     print("=" * 60)
     return 0

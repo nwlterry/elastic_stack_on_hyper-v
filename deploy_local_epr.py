@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Deploy local EPR on Kibana, create fleet_server integration, verify Fleet enrollment."""
+"""Deploy local EPR on Kibana with all node-role integration packages."""
 import shlex
 import time
 
-from deploy_ordered_stack import NODES, REMOTE, connect, copy_scripts, get_elastic_password, run
-
-POLICY = "9be39452-a297-4b8b-9fae-b12ab3cb9315"
+from deploy_ordered_stack import (
+    EPR_PACKAGES,
+    NODES,
+    REMOTE,
+    connect,
+    copy_scripts,
+    curl_elastic_auth,
+    ensure_fleet_epr_ready,
+    get_elastic_password,
+    run,
+    wait_kibana_stable,
+)
 
 
 def main():
@@ -14,40 +23,35 @@ def main():
     es.close()
     print(f"elastic={pwd}", flush=True)
 
-    kb = connect(NODES["kibana"][0])
-    copy_scripts(kb, roles=("kibana",))
-    run(kb, f"bash {REMOTE}/install-local-epr.sh", timeout=120)
-    run(kb, f"FLEET_HOST={NODES['fleet'][1]} bash {REMOTE}/configure-fleet-airgap.sh", timeout=600)
+    kb_ip = NODES["kibana"][0]
+    if not wait_kibana_stable(kb_ip, elastic_pwd=pwd):
+        print("Kibana not stable", flush=True)
+        return 1
 
-    auth = shlex.quote(f"elastic:{pwd}")
-    for i in range(30):
-        code = run(
-            kb,
-            f"curl -s -o /dev/null -w '%{{http_code}}' -u {auth} -H 'kbn-xsrf:true' "
-            f"http://127.0.0.1:5601/api/status",
-            check=False,
-            timeout=30,
-        ).strip()
-        if code == "200":
-            break
-        time.sleep(10)
+    ensure_fleet_epr_ready(pwd)
 
+    kb = connect(kb_ip)
+    auth = curl_elastic_auth(pwd)
     run(
         kb,
         f"ELASTIC_PASS={shlex.quote(pwd)} bash {REMOTE}/create-fleet-server-policy.sh",
         timeout=600,
         check=False,
     )
-    print(
-        run(
-            kb,
-            f"curl -s -u {auth} -H 'kbn-xsrf:true' "
-            f"'http://127.0.0.1:5601/api/fleet/package_policies?perPage=20'",
-            check=False,
-            timeout=60,
-        ),
-        flush=True,
+    installed = run(
+        kb,
+        f"curl -s -u {auth} -H 'kbn-xsrf:true' "
+        f"http://127.0.0.1:5601/api/fleet/epm/packages/installed | "
+        f"python3 -c \"import sys,json; d=json.load(sys.stdin); "
+        f"print([p.get('name') for p in d.get('items',[])])\"",
+        check=False,
+        timeout=60,
     )
+    print(f"installed={installed.strip()}", flush=True)
+    missing = [p for p in EPR_PACKAGES if p not in installed]
+    if missing:
+        print(f"WARN: still missing packages: {missing}", flush=True)
+
     print(run(kb, "journalctl -u kibana -n 10 --no-pager | grep -iE 'epr|deploy_agent|fleet_server|error' || true", check=False))
     kb.close()
 
