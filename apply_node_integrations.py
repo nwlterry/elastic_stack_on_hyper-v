@@ -2,6 +2,9 @@
 """
 Apply node-role Fleet integrations (Linux system, Elasticsearch, Kibana) to agent
 policies and trigger enrolled agents to pick up the updated policy.
+
+Uses stored elastic password (secrets/elastic-password) — never resets.
+Run directly: python apply_node_integrations.py
 """
 from __future__ import annotations
 
@@ -116,6 +119,41 @@ def expected_policy_revisions(kb, elastic_pwd: str) -> dict[str, int]:
     return revisions
 
 
+def agents_synced(kb, elastic_pwd: str) -> bool:
+    """True when ES/Kibana agents are online on the latest policy revision."""
+    auth = curl_elastic_auth(elastic_pwd)
+    expected = expected_policy_revisions(kb, elastic_pwd)
+    py = (
+        "import sys,json; "
+        f"expected={json.dumps(expected)}; "
+        "d=json.load(sys.stdin); "
+        f"ids=set({json.dumps(list(expected))}); "
+        "items=[a for a in d.get('items',[]) if a.get('policy_id') in ids]; "
+        "synced=sum(1 for a in items "
+        "if a.get('last_checkin_status')=='online' "
+        "and a.get('policy_revision',0)>=expected.get(a.get('policy_id'),0)); "
+        "print(len(items), synced)"
+    )
+    out = run(
+        kb,
+        f"curl -s -u {auth} -H 'kbn-xsrf:true' "
+        f"'http://127.0.0.1:5601/api/fleet/agents?perPage=20' | "
+        f"python3 -c {shlex.quote(py)}",
+        check=False,
+        timeout=60,
+    ).strip()
+    parts = out.split()
+    if len(parts) == 2:
+        total, synced = map(int, parts)
+        return total >= 4 and synced >= 4
+    return False
+
+
+def fleet_api_authenticated(kb, elastic_pwd: str) -> bool:
+    data = fleet_api(kb, elastic_pwd, "GET", "/api/fleet/agents?perPage=1")
+    return "items" in data and "statusCode" not in data
+
+
 def wait_agents_policy_sync(kb, elastic_pwd: str, max_polls: int = 24) -> bool:
     auth = curl_elastic_auth(elastic_pwd)
     expected = expected_policy_revisions(kb, elastic_pwd)
@@ -198,6 +236,25 @@ def main() -> int:
     if not wait_kibana_stable(kb_ip, elastic_pwd=elastic_pwd):
         print("Kibana not stable", flush=True)
         return 1
+
+    kb = connect(kb_ip)
+    if not fleet_api_authenticated(kb, elastic_pwd):
+        kb.close()
+        print(
+            "Fleet API authentication failed. Fix secrets/elastic-password or run:\n"
+            "  python show_elastic_password.py",
+            flush=True,
+        )
+        return 1
+
+    if integrations_satisfied(kb, elastic_pwd) and agents_synced(kb, elastic_pwd):
+        print("=== Integrations and agents already in sync — nothing to do ===", flush=True)
+        print_summary(kb, elastic_pwd)
+        kb.close()
+        print("\nNODE INTEGRATIONS APPLIED", flush=True)
+        return 0
+
+    kb.close()
 
     print("=== Stage EPR packages + air-gap ===", flush=True)
     ensure_fleet_epr_ready(elastic_pwd)
