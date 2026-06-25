@@ -5,7 +5,7 @@ set -euo pipefail
 REMOTE_DIR="${REMOTE_DIR:-/opt/elastic-setup}"
 EPR_DIR="${EPR_DIR:-${REMOTE_DIR}/epr-packages}"
 BUNDLED="/usr/share/kibana/node_modules/@kbn/fleet-plugin/target/bundled_packages"
-EPR_BASE="${EPR_BASE:-https://epr.elastic.co/download}"
+EPR_BASE="${EPR_BASE:-https://epr.elastic.co/epr}"
 
 mkdir -p "$EPR_DIR"
 
@@ -14,7 +14,7 @@ declare -A PACKAGES=(
   [elastic_agent]=2.3.0
   [system]=1.60.0
   [elasticsearch]=1.12.0
-  [kibana]=1.11.0
+  [kibana]=2.3.1
 )
 
 fetch_or_copy() {

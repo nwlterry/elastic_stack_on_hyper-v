@@ -18,7 +18,7 @@ EPR_PACKAGES = {
     "elastic_agent": "2.3.0",
     "system": "1.60.0",
     "elasticsearch": "1.12.0",
-    "kibana": "1.11.0",
+    "kibana": "2.3.1",
 }
 
 

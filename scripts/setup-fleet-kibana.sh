@@ -179,7 +179,7 @@ def safe_integration(label, fn):
         print(f"INTEGRATION_WARN={label}:{detail[:500]}", flush=True)
 
 
-def wait_for_packages(names, timeout_sec=600):
+def wait_for_packages(names, timeout_sec=180):
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         try:
@@ -196,15 +196,8 @@ def wait_for_packages(names, timeout_sec=600):
     print(f"PACKAGES_TIMEOUT={','.join(names)}", flush=True)
 
 
-def create_package_policy(body, legacy_body=None):
-    try:
-        api("POST", "/api/fleet/package_policies", body)
-        return
-    except urllib.error.HTTPError as e:
-        if legacy_body is not None and e.code in (400, 422):
-            api("POST", "/api/fleet/package_policies?format=legacy", legacy_body)
-            return
-        raise
+def create_package_policy(body):
+    api("POST", "/api/fleet/package_policies", body)
 
 
 def ensure_fleet_server_integration(policy_id):
@@ -232,135 +225,67 @@ def ensure_system_integration(policy_id, label):
     if find_package_policy(policy_id, "system"):
         return
     ver = latest_package_version("system")
-    base = {
+    create_package_policy({
         "name": f"{label}-system",
-        "description": "System logs and metrics",
+        "description": "Linux system logs and metrics",
         "namespace": "default",
         "policy_id": policy_id,
         "enabled": True,
         "package": {"name": "system", "version": ver},
-    }
-    array_body = {
-        **base,
         "inputs": [
-            {"type": "system/metrics", "policy_template": "metrics", "enabled": True},
-            {"type": "logfile", "policy_template": "logs", "enabled": True},
+            {"type": "system/metrics", "policy_template": "metrics", "enabled": True, "streams": []},
+            {"type": "logfile", "policy_template": "logs", "enabled": True, "streams": []},
         ],
-    }
-    legacy_body = {
-        **base,
-        "inputs": {
-            "system-metrics": {
-                "enabled": True,
-                "streams": {
-                    "system.cpu": {"enabled": True},
-                    "system.memory": {"enabled": True},
-                    "system.network": {"enabled": True},
-                    "system.diskio": {"enabled": True},
-                    "system.load": {"enabled": True},
-                    "system.filesystem": {"enabled": True},
-                    "system.uptime": {"enabled": True},
-                },
-            },
-            "system-logs": {
-                "enabled": True,
-                "streams": {
-                    "system.syslog": {
-                        "enabled": True,
-                        "vars": {"paths": ["/var/log/messages", "/var/log/syslog"]},
-                    },
-                    "system.auth": {
-                        "enabled": True,
-                        "vars": {"paths": ["/var/log/secure", "/var/log/auth.log"]},
-                    },
-                },
-            },
-        },
-    }
-    create_package_policy(array_body, legacy_body)
+    })
 
 
 def ensure_elasticsearch_integration(policy_id):
     if find_package_policy(policy_id, "elasticsearch"):
         return
     ver = latest_package_version("elasticsearch")
-    base = {
+    create_package_policy({
         "name": "es-node-elasticsearch",
-        "description": "Elasticsearch metrics",
+        "description": "Elasticsearch node metrics",
         "namespace": "default",
         "policy_id": policy_id,
         "enabled": True,
         "package": {"name": "elasticsearch", "version": ver},
-    }
-    array_body = {
-        **base,
         "inputs": [
             {
                 "type": "elasticsearch/metrics",
                 "policy_template": "elasticsearch",
                 "enabled": True,
                 "vars": {
-                    "hosts": ["https://localhost:9200"],
-                    "scope": "node",
+                    "hosts": {"value": ["https://localhost:9200"], "type": "text"},
+                    "scope": {"value": "node", "type": "text"},
                 },
+                "streams": [],
             },
         ],
-    }
-    legacy_body = {
-        **base,
-        "inputs": {
-            "elasticsearch-metrics": {
-                "enabled": True,
-                "vars": {
-                    "hosts": ["https://localhost:9200"],
-                    "scope": "node",
-                },
-                "streams": {
-                    "elasticsearch.stack_monitoring.node_stats": {"enabled": True},
-                    "elasticsearch.stack_monitoring.index_stats": {"enabled": True},
-                },
-            },
-        },
-    }
-    create_package_policy(array_body, legacy_body)
+    })
 
 
 def ensure_kibana_integration(policy_id):
     if find_package_policy(policy_id, "kibana"):
         return
     ver = latest_package_version("kibana")
-    base = {
+    create_package_policy({
         "name": "kibana-node-kibana",
-        "description": "Kibana metrics",
+        "description": "Kibana node metrics",
         "namespace": "default",
         "policy_id": policy_id,
         "enabled": True,
         "package": {"name": "kibana", "version": ver},
-    }
-    array_body = {
-        **base,
         "inputs": [
             {
                 "type": "kibana/metrics",
                 "policy_template": "kibana",
                 "enabled": True,
-                "vars": {"hosts": ["http://localhost:5601"]},
+                "vars": {"hosts": {"value": ["http://localhost:5601"], "type": "text"}},
+                "streams": [],
             },
         ],
-    }
-    legacy_body = {
-        **base,
-        "inputs": {
-            "kibana-metrics": {
-                "enabled": True,
-                "vars": {"hosts": ["http://localhost:5601"]},
-                "streams": {
-                    "kibana.stack_monitoring.stats": {"enabled": True},
-                },
-            },
-        },
-    }
-    create_package_policy(array_body, legacy_body)
+    })
 
 
 def enroll_token(policy_id):

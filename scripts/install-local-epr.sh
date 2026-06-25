@@ -26,6 +26,14 @@ EOF
 systemctl daemon-reload
 systemctl enable local-epr
 systemctl restart local-epr
-sleep 2
-curl -sf "http://127.0.0.1:${EPR_PORT}/health"
-echo "Local EPR ready on port ${EPR_PORT}"
+
+for i in $(seq 1 30); do
+  if curl -sf "http://127.0.0.1:${EPR_PORT}/health" >/dev/null 2>&1; then
+    echo "Local EPR ready on port ${EPR_PORT} (poll ${i})"
+    exit 0
+  fi
+  sleep 2
+done
+echo "Local EPR did not respond on port ${EPR_PORT}" >&2
+journalctl -u local-epr -n 20 --no-pager >&2 || true
+exit 1

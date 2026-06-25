@@ -230,11 +230,23 @@ def ensure_fleet_epr_ready(elastic_pwd: str) -> None:
     c = connect(kb_ip)
     copy_scripts(c, roles=("kibana",))
     run(c, f"bash {REMOTE}/stage-epr-packages.sh", timeout=900, check=False)
-    run(c, f"bash {REMOTE}/install-local-epr.sh", timeout=120)
+    run(c, f"bash {REMOTE}/install-local-epr.sh", timeout=180, check=False)
     run(
         c,
         f"FLEET_HOST={NODES['fleet'][1]} bash {REMOTE}/configure-fleet-airgap.sh",
         timeout=600,
+    )
+    run(
+        c,
+        f"ELASTIC_PASS={shlex.quote(elastic_pwd)} bash {REMOTE}/upload-fleet-packages.sh",
+        timeout=900,
+        check=False,
+    )
+    run(
+        c,
+        f"ELASTIC_PASS={shlex.quote(elastic_pwd)} bash {REMOTE}/install-fleet-packages.sh",
+        timeout=900,
+        check=False,
     )
     auth = curl_elastic_auth(elastic_pwd)
     required = list(EPR_PACKAGES.keys())

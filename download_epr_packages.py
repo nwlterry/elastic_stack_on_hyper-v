@@ -9,7 +9,7 @@ from pathlib import Path
 from config_loader import EPR_PACKAGES, ROOT
 
 EPR_DIR = ROOT / "packages" / "epr"
-EPR_BASE = "https://epr.elastic.co/download"
+EPR_BASE = "https://epr.elastic.co/epr"
 
 
 def download_package(name: str, version: str) -> Path:

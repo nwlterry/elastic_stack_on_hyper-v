@@ -57,7 +57,7 @@ block = """xpack.fleet.packages:
   - name: elasticsearch
     version: 1.12.0
   - name: kibana
-    version: 1.11.0"""
+    version: 2.3.1"""
 out.append(block)
 path.write_text("\n".join(out) + "\n")
 PY
