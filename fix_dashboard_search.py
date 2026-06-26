@@ -288,13 +288,35 @@ def _panel_uses_pipeline_total_fields(state: dict) -> bool:
     return any("ingest_pipeline.total" in _column_text(col) for col in _iter_lens_columns(state))
 
 
+def _is_legacy_unscoped_kql(kql: str) -> bool:
+    """Detect Fleet default / whitespace-variant ingest pipeline KQL."""
+    if not kql or not kql.strip():
+        return True
+    normalized = " ".join(kql.split())
+    base = " ".join(INGEST_PIPELINE_KQL.split())
+    return normalized == base
+
+
+def _panel_scope_kql(state: dict) -> str | None:
+    """Pick processor- vs pipeline-scoped KQL for this Lens panel."""
+    if _panel_uses_processor_fields(state):
+        return PROCESSOR_PANEL_KQL
+    if _panel_uses_pipeline_total_fields(state):
+        return PIPELINE_PANEL_KQL
+    text = json.dumps(state.get("datasourceStates", {}))
+    if "ingest_pipeline.processor" in text:
+        return PROCESSOR_PANEL_KQL
+    if "ingest_pipeline.total" in text:
+        return PIPELINE_PANEL_KQL
+    if _is_legacy_unscoped_kql(state.get("query", {}).get("query", "")):
+        return PIPELINE_PANEL_KQL
+    return None
+
+
 def _patch_lens_panel_queries(state: dict) -> bool:
     """Scope queries to processor vs pipeline doc types (mutually exclusive in this index)."""
-    if _panel_uses_processor_fields(state):
-        target = PROCESSOR_PANEL_KQL
-    elif _panel_uses_pipeline_total_fields(state):
-        target = PIPELINE_PANEL_KQL
-    else:
+    target = _panel_scope_kql(state)
+    if not target:
         return False
     query = state.setdefault("query", {"language": "kuery", "query": ""})
     if query.get("query") == target:
