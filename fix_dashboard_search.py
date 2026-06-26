@@ -291,7 +291,16 @@ def _is_legacy_unscoped_kql(kql: str) -> bool:
         return True
     normalized = " ".join(kql.split())
     base = " ".join(INGEST_PIPELINE_KQL.split())
-    return normalized == base
+    if normalized == base:
+        return True
+    # Prior patch used KQL "field:*" suffixes that do not work in Elasticsearch.
+    if "ingest_pipeline.total.count:*" in normalized:
+        return True
+    if "ingest_pipeline.processor.type_tag:*" in normalized:
+        return True
+    if normalized.startswith("(") and "elasticsearch.ingest_pipeline" in normalized:
+        return True
+    return False
 
 
 def _panel_exists_field(state: dict) -> str | None:
@@ -344,7 +353,8 @@ def _patch_lens_panel_queries(state: dict) -> bool:
     query = state.setdefault("query", {"language": "kuery", "query": ""})
     target_kql = INGEST_PIPELINE_KQL
     current = " ".join((query.get("query") or "").split())
-    if current != target_kql:
+    target_norm = " ".join(target_kql.split())
+    if current != target_norm:
         query["language"] = "kuery"
         query["query"] = target_kql
         changed = True
