@@ -43,11 +43,11 @@ DATA_VIEWS = (
     "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9",
 )
 
-PACKAGES = (
-    ("system", "1.60.0"),
-    ("elasticsearch", "1.12.0"),
-    ("kibana", "2.3.1"),
-    ("elastic_agent", "2.3.0"),
+# Elasticsearch integration reinstall resets managed SM data views; patch after install.
+PACKAGES = (("elasticsearch", "1.12.0"),)
+
+INGEST_PIPELINE_KQL = (
+    'service.type:elasticsearch or data_stream.dataset:"elasticsearch.ingest_pipeline"'
 )
 
 
@@ -82,45 +82,59 @@ def fix_monitoring_ui_creds(kb, monitoring_pwd: str) -> None:
 
 
 def patch_data_view(kb, auth: str, view_id: str) -> None:
-    obj = kibana_curl(kb, auth, "GET", f"/api/saved_objects/index-pattern/{view_id}")
-    if obj.get("statusCode") == 404:
-        print(f"  skip missing data view {view_id}", flush=True)
-        return
-    attrs = obj.get("attributes", {})
-    runtime = attrs.get("runtimeFieldMap", "{}")
-    try:
-        runtime_map = json.loads(runtime) if runtime else {}
-    except json.JSONDecodeError:
+    resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{view_id}")
+    dv = resp.get("data_view")
+    if not dv:
+        obj = kibana_curl(kb, auth, "GET", f"/api/saved_objects/index-pattern/{view_id}")
+        if obj.get("statusCode") == 404:
+            print(f"  skip missing data view {view_id}", flush=True)
+            return
+        attrs = obj.get("attributes", {})
         runtime_map = {}
+        try:
+            runtime_map = json.loads(attrs.get("runtimeFieldMap", "{}") or "{}")
+        except json.JSONDecodeError:
+            runtime_map = {}
+        if "@timestamp" not in runtime_map:
+            runtime_map["@timestamp"] = RUNTIME_TIMESTAMP["@timestamp"]
+        attrs["runtimeFieldMap"] = json.dumps(runtime_map)
+        attrs["allowNoIndex"] = True
+        put = kibana_curl(
+            kb,
+            auth,
+            "PUT",
+            f"/api/saved_objects/index-pattern/{view_id}?overwrite=true",
+            {"attributes": attrs},
+        )
+        if put.get("statusCode", 200) >= 400:
+            print(f"  WARN saved_objects update {view_id}: {put}", flush=True)
+        else:
+            print(f"  updated {view_id} via saved_objects (runtime @timestamp)", flush=True)
+        return
+
+    runtime_map = dict(dv.get("runtimeFieldMap") or {})
     if "@timestamp" not in runtime_map:
         runtime_map["@timestamp"] = RUNTIME_TIMESTAMP["@timestamp"]
-    attrs["runtimeFieldMap"] = json.dumps(runtime_map)
-    attrs["allowNoIndex"] = True
-    body = {"attributes": attrs}
-    resp = kibana_curl(
-        kb,
-        auth,
-        "PUT",
-        f"/api/saved_objects/index-pattern/{view_id}?overwrite=true",
-        body,
+    body = {
+        "data_view": {
+            "title": dv["title"],
+            "name": dv.get("name"),
+            "timeFieldName": dv.get("timeFieldName", "@timestamp"),
+            "runtimeFieldMap": runtime_map,
+            "allowNoIndex": True,
+        }
+    }
+    put = kibana_curl(kb, auth, "POST", f"/api/data_views/data_view/{view_id}", body)
+    if put.get("statusCode", 200) >= 400:
+        print(f"  WARN data_views update {view_id}: {put}", flush=True)
+        return
+    fields = put.get("data_view", {}).get("fields", {})
+    runtime = put.get("data_view", {}).get("runtimeFieldMap", {})
+    print(
+        f"  updated {view_id} (runtime @timestamp, fields={len(fields)}, "
+        f"runtime_keys={list(runtime.keys())})",
+        flush=True,
     )
-    if resp.get("statusCode", 200) >= 400:
-        print(f"  WARN update {view_id}: {resp}", flush=True)
-    else:
-        print(f"  updated data view {view_id} (runtime @timestamp)", flush=True)
-
-    refresh = kibana_curl(
-        kb,
-        auth,
-        "POST",
-        f"/api/index_patterns/index_pattern/{view_id}/fields/_refresh?metaFields=_source&metaFields=_id&metaFields=_type&metaFields=_index&metaFields=_score",
-    )
-    if refresh.get("statusCode", 200) >= 400:
-        refresh = kibana_curl(kb, auth, "POST", f"/api/data_views/data_view/{view_id}/fields/refresh")
-    if refresh.get("statusCode", 200) >= 400:
-        print(f"  field refresh {view_id}: {str(refresh)[:200]}", flush=True)
-    else:
-        print(f"  refreshed fields for {view_id}", flush=True)
 
 
 def reinstall_package_assets(kb, auth: str, name: str, version: str) -> None:
@@ -152,7 +166,7 @@ def verify_dashboard_search(kb, auth: str) -> bool:
                 "index": index,
                 "body": {
                     "size": 0,
-                    "query": {"range": {"@timestamp": {"gte": "now-24h", "lte": "now"}}},
+                    "query": {"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}},
                 },
             }
         }
@@ -166,6 +180,52 @@ def verify_dashboard_search(kb, auth: str) -> bool:
             total = raw.get("hits", {}).get("total", 0)
             print(f"  OK {label}: hits={total} failed_shards={failed}", flush=True)
     return ok
+
+
+def verify_ingest_pipeline_dashboard(kb, auth: str) -> bool:
+    """Verify Lens-style queries used by [Elasticsearch] Ingest Pipeline Detail."""
+    print("=== Verify Ingest Pipeline Detail dashboard queries ===", flush=True)
+    index = "metrics-*,metricbeat-*,.monitoring-*"
+    body = {
+        "params": {
+            "index": index,
+            "body": {
+                "size": 0,
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}},
+                            {"query_string": {"query": INGEST_PIPELINE_KQL}},
+                        ]
+                    }
+                },
+                "aggs": {
+                    "pipelines": {
+                        "terms": {"field": "elasticsearch.ingest_pipeline.name", "size": 5},
+                        "aggs": {
+                            "m": {"max": {"field": "elasticsearch.ingest_pipeline.total.count"}},
+                            "h": {
+                                "date_histogram": {"field": "@timestamp", "fixed_interval": "1h"},
+                                "aggs": {
+                                    "m2": {"max": {"field": "elasticsearch.ingest_pipeline.total.count"}},
+                                    "rate": {"derivative": {"buckets_path": "m2"}},
+                                },
+                            },
+                        },
+                    }
+                },
+            },
+        }
+    }
+    resp = kibana_curl(kb, auth, "POST", "/internal/search/ese", body)
+    raw = resp.get("rawResponse", {})
+    failed = raw.get("_shards", {}).get("failed", 1)
+    total = raw.get("hits", {}).get("total", 0)
+    if failed or resp.get("statusCode", 200) >= 400:
+        print(f"  FAIL ingest pipeline lens query: {resp.get('message', resp)[:200]}", flush=True)
+        return False
+    print(f"  OK ingest pipeline lens query: hits={total} failed_shards={failed}", flush=True)
+    return True
 
 
 def main() -> int:
@@ -186,14 +246,14 @@ def main() -> int:
         return 1
 
     kb = connect(kb_ip)
-    print("=== Patch Fleet data views ===", flush=True)
-    for view_id in DATA_VIEWS:
-        patch_data_view(kb, auth, view_id)
-
     for name, version in PACKAGES:
         reinstall_package_assets(kb, auth, name, version)
 
-    ok = verify_dashboard_search(kb, auth)
+    print("=== Patch Fleet / Stack Monitoring data views (after package reinstall) ===", flush=True)
+    for view_id in DATA_VIEWS:
+        patch_data_view(kb, auth, view_id)
+
+    ok = verify_dashboard_search(kb, auth) and verify_ingest_pipeline_dashboard(kb, auth)
     kb.close()
     return 0 if ok else 1
 
