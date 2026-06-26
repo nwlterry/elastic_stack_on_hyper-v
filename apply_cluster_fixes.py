@@ -12,6 +12,7 @@ import sys
 
 from apply_node_integrations import main as apply_integrations, restart_agents_on_nodes
 from cluster_health_review import main as run_health_review
+from fix_dashboard_search import main as fix_dashboard_search
 from deploy_ordered_stack import (
     ES_NODES,
     ES_PRIMARY_IP,
@@ -120,6 +121,9 @@ def main() -> int:
             print("apply_node_integrations returned non-zero", flush=True)
     else:
         print("=== Integration streams already populated ===", flush=True)
+
+    print("=== Fix dashboard search (data views + monitoring UI creds) ===", flush=True)
+    fix_dashboard_search()
 
     print("=== Restart elastic-agents (refresh Fleet/ES connections) ===", flush=True)
     restart_agents_on_nodes(elastic_pwd)

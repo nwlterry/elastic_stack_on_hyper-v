@@ -26,7 +26,12 @@ set_kibana_yml "monitoring.kibana.collection.enabled" "true"
 set_kibana_yml "monitoring.kibana.collection.interval" "10000"
 set_kibana_yml "monitoring.ui.elasticsearch.hosts" "[\"https://${ES_HOST}:9200\"]"
 
-if [[ -n "$ELASTIC_PASS" ]]; then
+MONITORING_USER="${MONITORING_USER:-elastic_monitoring}"
+MONITORING_PASS="${MONITORING_PASS:-}"
+if [[ -n "$MONITORING_PASS" ]]; then
+  set_kibana_yml "monitoring.ui.elasticsearch.username" "\"${MONITORING_USER}\""
+  set_kibana_yml "monitoring.ui.elasticsearch.password" "\"${MONITORING_PASS}\""
+elif [[ -n "$ELASTIC_PASS" ]]; then
   echo "=== Elasticsearch monitoring collection (cluster settings) ==="
   body='{"persistent":{"xpack.monitoring.collection.enabled":true,"xpack.monitoring.elasticsearch.collection.enabled":true}}'
   out="$(curl -sk -u "${ELASTIC_USER}:${ELASTIC_PASS}" \
