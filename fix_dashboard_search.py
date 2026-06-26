@@ -288,46 +288,50 @@ def _panel_uses_pipeline_total_fields(state: dict) -> bool:
     return any("ingest_pipeline.total" in _column_text(col) for col in _iter_lens_columns(state))
 
 
-def _exists_filter(field: str) -> dict:
-    return {
-        "$state": {"store": "appState"},
-        "meta": {
-            "alias": None,
-            "disabled": False,
-            "negate": False,
-            "index": INGEST_PIPELINE_DATA_VIEW,
-            "key": field,
-            "type": "exists",
-        },
-        "query": {"exists": {"field": field}},
-    }
-
-
 def _patch_lens_panel_queries(state: dict) -> bool:
     """Scope queries to processor vs pipeline doc types (mutually exclusive in this index)."""
     if _panel_uses_processor_fields(state):
         target = PROCESSOR_PANEL_KQL
-        exists_field = PROCESSOR_EXISTS_FIELD
     elif _panel_uses_pipeline_total_fields(state):
         target = PIPELINE_PANEL_KQL
-        exists_field = PIPELINE_EXISTS_FIELD
     else:
         return False
-    changed = False
     query = state.setdefault("query", {"language": "kuery", "query": ""})
-    if query.get("query") != target:
-        query["language"] = "kuery"
-        query["query"] = target
-        changed = True
-    filters = state.setdefault("filters", [])
-    has_exists = any(
-        f.get("meta", {}).get("type") == "exists"
-        and f.get("meta", {}).get("key") == exists_field
-        for f in filters
-    )
-    if not has_exists:
-        filters.append(_exists_filter(exists_field))
-        changed = True
+    if query.get("query") == target:
+        return False
+    query["language"] = "kuery"
+    query["query"] = target
+    return True
+
+
+def _normalize_lens_columns(state: dict) -> bool:
+    """Fix Lens state shapes that crash the dashboard UI (e.g. .map on undefined)."""
+    changed = False
+    filters = state.get("filters")
+    if isinstance(filters, list):
+        cleaned = [
+            f
+            for f in filters
+            if not (
+                f.get("meta", {}).get("type") == "exists"
+                and f.get("meta", {}).get("key")
+                in {PROCESSOR_EXISTS_FIELD, PIPELINE_EXISTS_FIELD}
+            )
+        ]
+        if len(cleaned) != len(filters):
+            state["filters"] = cleaned
+            changed = True
+    for col in _iter_lens_columns(state):
+        if col.get("operationType") != "terms":
+            continue
+        params = col.setdefault("params", {})
+        if params.get("parentFormat", {}).get("id") == "multi_terms":
+            if params.get("secondaryFields") is None:
+                params["secondaryFields"] = []
+                changed = True
+        elif "secondaryFields" in params and params.get("secondaryFields") is None:
+            params["secondaryFields"] = []
+            changed = True
     return changed
 
 
@@ -364,7 +368,8 @@ def _patch_lens_order_aggs(state: dict) -> bool:
 
 
 def _patch_lens_state(state: dict) -> bool:
-    changed = _patch_lens_panel_queries(state)
+    changed = _normalize_lens_columns(state)
+    changed = _patch_lens_panel_queries(state) or changed
     changed = _patch_lens_order_aggs(state) or changed
     return changed
 
@@ -388,7 +393,8 @@ def patch_ingest_pipeline_dashboard(kb, auth: str) -> None:
         if not state_raw:
             continue
         state = json.loads(state_raw) if isinstance(state_raw, str) else dict(state_raw)
-        if not _patch_lens_state(state):
+        needs_write = not isinstance(state_raw, str) or _patch_lens_state(state)
+        if not needs_write:
             continue
         lens_attrs["state"] = json.dumps(state)
         emb["attributes"] = lens_attrs
