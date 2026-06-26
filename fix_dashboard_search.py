@@ -93,6 +93,20 @@ def fix_monitoring_ui_creds(kb, monitoring_pwd: str) -> None:
     )
 
 
+def _runtime_map_for_view(view_id: str, runtime_map: dict) -> dict:
+    """Return runtime fields appropriate for each data view."""
+    runtime_map = dict(runtime_map)
+    if view_id == INGEST_PIPELINE_DATA_VIEW:
+        # Ingest pipeline Fleet metrics already have native @timestamp. A runtime
+        # @timestamp that reads doc['@timestamp'] causes a cyclic dependency when
+        # controls/Lens apply dashboard time filters (search_phase_execution_exception).
+        runtime_map.pop("@timestamp", None)
+        return runtime_map
+    if "@timestamp" not in runtime_map:
+        runtime_map["@timestamp"] = RUNTIME_TIMESTAMP["@timestamp"]
+    return runtime_map
+
+
 def patch_data_view(kb, auth: str, view_id: str) -> None:
     resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{view_id}")
     dv = resp.get("data_view")
@@ -107,8 +121,7 @@ def patch_data_view(kb, auth: str, view_id: str) -> None:
             runtime_map = json.loads(attrs.get("runtimeFieldMap", "{}") or "{}")
         except json.JSONDecodeError:
             runtime_map = {}
-        if "@timestamp" not in runtime_map:
-            runtime_map["@timestamp"] = RUNTIME_TIMESTAMP["@timestamp"]
+        runtime_map = _runtime_map_for_view(view_id, runtime_map)
         if view_id == INGEST_PIPELINE_DATA_VIEW:
             attrs["title"] = INGEST_PIPELINE_INDEX
         attrs["runtimeFieldMap"] = json.dumps(runtime_map)
@@ -123,12 +136,14 @@ def patch_data_view(kb, auth: str, view_id: str) -> None:
         if put.get("statusCode", 200) >= 400:
             print(f"  WARN saved_objects update {view_id}: {put}", flush=True)
         else:
-            print(f"  updated {view_id} via saved_objects (runtime @timestamp)", flush=True)
+            print(
+                f"  updated {view_id} via saved_objects "
+                f"(runtime_keys={list(runtime_map.keys())})",
+                flush=True,
+            )
         return
 
-    runtime_map = dict(dv.get("runtimeFieldMap") or {})
-    if "@timestamp" not in runtime_map:
-        runtime_map["@timestamp"] = RUNTIME_TIMESTAMP["@timestamp"]
+    runtime_map = _runtime_map_for_view(view_id, dict(dv.get("runtimeFieldMap") or {}))
     title = dv["title"]
     if view_id == INGEST_PIPELINE_DATA_VIEW:
         title = INGEST_PIPELINE_INDEX
@@ -148,7 +163,7 @@ def patch_data_view(kb, auth: str, view_id: str) -> None:
     fields = put.get("data_view", {}).get("fields", {})
     runtime = put.get("data_view", {}).get("runtimeFieldMap", {})
     print(
-        f"  updated {view_id} title={title} (runtime @timestamp, fields={len(fields)}, "
+        f"  updated {view_id} title={title} (fields={len(fields)}, "
         f"runtime_keys={list(runtime.keys())})",
         flush=True,
     )
@@ -226,6 +241,47 @@ def _search_ok(kb, auth: str, label: str, index: str, body: dict) -> bool:
     total = raw.get("hits", {}).get("total", 0)
     print(f"  OK {label}: hits={total} failed_shards={failed}", flush=True)
     return True
+
+
+def verify_controls_api(kb, auth: str) -> bool:
+    """Verify options-list controls API (same path/body the Kibana UI uses)."""
+    print("=== Verify dashboard controls API ===", flush=True)
+    ok = True
+    body = {
+        "size": 50,
+        "fieldName": "elasticsearch.cluster.name",
+        "allowExpensiveQueries": True,
+        "filters": [
+            {"query_string": {"query": INGEST_PIPELINE_KQL}},
+            {"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}},
+        ],
+        "selectedOptions": [],
+        "searchString": "",
+    }
+    for field in CONTROL_FIELDS:
+        body["fieldName"] = field
+        resp = kibana_curl(
+            kb,
+            auth,
+            "POST",
+            f"/internal/controls/optionsList/{INGEST_PIPELINE_INDEX}",
+            body,
+        )
+        suggestions = resp.get("suggestions") or []
+        if resp.get("statusCode", 200) >= 400 or not suggestions:
+            print(
+                f"  FAIL control {field}: "
+                f"{resp.get('message', resp)[:200]}",
+                flush=True,
+            )
+            ok = False
+        else:
+            print(
+                f"  OK control {field}: "
+                f"{len(suggestions)} options (e.g. {suggestions[0]['value']})",
+                flush=True,
+            )
+    return ok
 
 
 def verify_ingest_pipeline_dashboard(kb, auth: str) -> bool:
@@ -307,7 +363,11 @@ def main() -> int:
     for view_id in DATA_VIEWS:
         patch_data_view(kb, auth, view_id)
 
-    ok = verify_dashboard_search(kb, auth) and verify_ingest_pipeline_dashboard(kb, auth)
+    ok = (
+        verify_dashboard_search(kb, auth)
+        and verify_controls_api(kb, auth)
+        and verify_ingest_pipeline_dashboard(kb, auth)
+    )
     kb.close()
     return 0 if ok else 1
 
