@@ -50,6 +50,18 @@ INGEST_PIPELINE_KQL = (
     'service.type:elasticsearch or data_stream.dataset:"elasticsearch.ingest_pipeline"'
 )
 
+# Broad pattern causes multi_terms type conflicts between ingest_pipeline (long
+# order_index) and stack_monitoring indices; only ingest dashboards use this view.
+INGEST_PIPELINE_INDEX = "metrics-elasticsearch.ingest_pipeline-*"
+INGEST_PIPELINE_DATA_VIEW = "elasticsearch-sm-metrics"
+
+CONTROL_FIELDS = (
+    "elasticsearch.cluster.name",
+    "elasticsearch.node.roles",
+    "elasticsearch.node.name",
+    "elasticsearch.ingest_pipeline.name",
+)
+
 
 def kibana_curl(kb, auth: str, method: str, path: str, body: dict | None = None) -> dict:
     data = ""
@@ -97,6 +109,8 @@ def patch_data_view(kb, auth: str, view_id: str) -> None:
             runtime_map = {}
         if "@timestamp" not in runtime_map:
             runtime_map["@timestamp"] = RUNTIME_TIMESTAMP["@timestamp"]
+        if view_id == INGEST_PIPELINE_DATA_VIEW:
+            attrs["title"] = INGEST_PIPELINE_INDEX
         attrs["runtimeFieldMap"] = json.dumps(runtime_map)
         attrs["allowNoIndex"] = True
         put = kibana_curl(
@@ -115,9 +129,12 @@ def patch_data_view(kb, auth: str, view_id: str) -> None:
     runtime_map = dict(dv.get("runtimeFieldMap") or {})
     if "@timestamp" not in runtime_map:
         runtime_map["@timestamp"] = RUNTIME_TIMESTAMP["@timestamp"]
+    title = dv["title"]
+    if view_id == INGEST_PIPELINE_DATA_VIEW:
+        title = INGEST_PIPELINE_INDEX
     body = {
         "data_view": {
-            "title": dv["title"],
+            "title": title,
             "name": dv.get("name"),
             "timeFieldName": dv.get("timeFieldName", "@timestamp"),
             "runtimeFieldMap": runtime_map,
@@ -131,7 +148,7 @@ def patch_data_view(kb, auth: str, view_id: str) -> None:
     fields = put.get("data_view", {}).get("fields", {})
     runtime = put.get("data_view", {}).get("runtimeFieldMap", {})
     print(
-        f"  updated {view_id} (runtime @timestamp, fields={len(fields)}, "
+        f"  updated {view_id} title={title} (runtime @timestamp, fields={len(fields)}, "
         f"runtime_keys={list(runtime.keys())})",
         flush=True,
     )
@@ -157,7 +174,7 @@ def verify_dashboard_search(kb, auth: str) -> bool:
     ok = True
     checks = [
         ("metrics-*", "metrics-*"),
-        ("elasticsearch-sm-metrics", "metrics-*,metricbeat-*,.monitoring-*"),
+        ("elasticsearch-sm-metrics", INGEST_PIPELINE_INDEX),
         ("es-stack-monitoring", ".ds-.monitoring-es-*,.monitoring-es*,.ds-metrics-elasticsearch.stack_monitoring.*"),
     ]
     for label, index in checks:
@@ -182,50 +199,87 @@ def verify_dashboard_search(kb, auth: str) -> bool:
     return ok
 
 
-def verify_ingest_pipeline_dashboard(kb, auth: str) -> bool:
-    """Verify Lens-style queries used by [Elasticsearch] Ingest Pipeline Detail."""
-    print("=== Verify Ingest Pipeline Detail dashboard queries ===", flush=True)
-    index = "metrics-*,metricbeat-*,.monitoring-*"
-    body = {
-        "params": {
-            "index": index,
-            "body": {
-                "size": 0,
-                "query": {
-                    "bool": {
-                        "filter": [
-                            {"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}},
-                            {"query_string": {"query": INGEST_PIPELINE_KQL}},
-                        ]
-                    }
-                },
-                "aggs": {
-                    "pipelines": {
-                        "terms": {"field": "elasticsearch.ingest_pipeline.name", "size": 5},
-                        "aggs": {
-                            "m": {"max": {"field": "elasticsearch.ingest_pipeline.total.count"}},
-                            "h": {
-                                "date_histogram": {"field": "@timestamp", "fixed_interval": "1h"},
-                                "aggs": {
-                                    "m2": {"max": {"field": "elasticsearch.ingest_pipeline.total.count"}},
-                                    "rate": {"derivative": {"buckets_path": "m2"}},
-                                },
-                            },
-                        },
-                    }
-                },
-            },
+def _ingest_pipeline_query() -> dict:
+    return {
+        "bool": {
+            "filter": [
+                {"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}},
+                {"query_string": {"query": INGEST_PIPELINE_KQL}},
+            ]
         }
     }
-    resp = kibana_curl(kb, auth, "POST", "/internal/search/ese", body)
+
+
+def _search_ok(kb, auth: str, label: str, index: str, body: dict) -> bool:
+    resp = kibana_curl(
+        kb,
+        auth,
+        "POST",
+        "/internal/search/ese",
+        {"params": {"index": index, "body": body}},
+    )
     raw = resp.get("rawResponse", {})
     failed = raw.get("_shards", {}).get("failed", 1)
-    total = raw.get("hits", {}).get("total", 0)
     if failed or resp.get("statusCode", 200) >= 400:
-        print(f"  FAIL ingest pipeline lens query: {resp.get('message', resp)[:200]}", flush=True)
+        print(f"  FAIL {label}: {resp.get('message', resp)[:200]}", flush=True)
         return False
-    print(f"  OK ingest pipeline lens query: hits={total} failed_shards={failed}", flush=True)
+    total = raw.get("hits", {}).get("total", 0)
+    print(f"  OK {label}: hits={total} failed_shards={failed}", flush=True)
     return True
+
+
+def verify_ingest_pipeline_dashboard(kb, auth: str) -> bool:
+    """Verify controls and processor Lens queries on the ingest pipeline data view."""
+    print("=== Verify Ingest Pipeline dashboard queries ===", flush=True)
+    index = INGEST_PIPELINE_INDEX
+    ok = True
+    for field in CONTROL_FIELDS:
+        ok &= _search_ok(
+            kb,
+            auth,
+            f"control {field.split('.')[-1]}",
+            index,
+            {
+                "size": 0,
+                "query": _ingest_pipeline_query(),
+                "aggs": {"opts": {"terms": {"field": field, "size": 20}}},
+            },
+        )
+    ok &= _search_ok(
+        kb,
+        auth,
+        "processor multi_terms (EPS/Time/Avg panels)",
+        index,
+        {
+            "size": 0,
+            "query": _ingest_pipeline_query(),
+            "aggs": {
+                "split": {
+                    "multi_terms": {
+                        "terms": [
+                            {"field": "elasticsearch.ingest_pipeline.processor.type_tag"},
+                            {"field": "elasticsearch.ingest_pipeline.processor.order_index"},
+                        ],
+                        "size": 10,
+                    },
+                    "aggs": {
+                        "h": {
+                            "date_histogram": {"field": "@timestamp", "fixed_interval": "1h"},
+                            "aggs": {
+                                "cnt_m": {"max": {"field": "elasticsearch.ingest_pipeline.processor.count"}},
+                                "cnt_r": {"derivative": {"buckets_path": "cnt_m"}},
+                                "time_m": {
+                                    "max": {"field": "elasticsearch.ingest_pipeline.processor.time.total.ms"}
+                                },
+                                "time_r": {"derivative": {"buckets_path": "time_m"}},
+                            },
+                        }
+                    },
+                }
+            },
+        },
+    )
+    return ok
 
 
 def main() -> int:
