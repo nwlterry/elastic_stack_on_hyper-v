@@ -5,6 +5,7 @@ Ordered ELK deploy: ES cluster → Kibana → Fleet Server → Agents + integrat
 Fleet Server VM is limited to 8 GB (config.psd1). Kibana must be up before Fleet
 policies/service-token enrollment (Fleet UI/API lives in Kibana).
 """
+import json
 import os
 import re
 import shlex
@@ -19,6 +20,7 @@ from scp import SCPClient
 from config_loader import EPR_PACKAGES, build_deploy_context, ensure_config
 from elastic_credentials import get_elastic_password as _resolve_elastic_password
 from elastic_credentials import reset_elastic_password as _reset_elastic_password
+from monitoring_credentials import ensure_monitoring_user
 
 ROOT = Path(__file__).parent
 SCRIPTS = ROOT / "scripts"
@@ -447,20 +449,42 @@ def _parse_fleet_output(out: str) -> dict:
     return result
 
 
-def _run_fleet_setup(elastic_pwd: str, phase: str) -> dict:
+def _es_nodes_fleet_json() -> str:
+    payload = [
+        {
+            "fqdn": fqdn,
+            "short": fqdn.split(".")[0],
+            "policy_name": f"{ES_POLICY_NAME}-{fqdn.split('.')[0]}",
+        }
+        for _, fqdn in ES_NODES
+    ]
+    return json.dumps(payload)
+
+
+def _run_fleet_setup(elastic_pwd: str, phase: str, monitoring_user: str = "", monitoring_pass: str = "") -> dict:
     ip = NODES["kibana"][0]
     if not wait_kibana_stable(ip, elastic_pwd=elastic_pwd):
         raise RuntimeError("Kibana must be stable before Fleet API setup")
 
+    if phase in ("agents", "all") and (not monitoring_user or not monitoring_pass):
+        es = connect(NODES["es01"][0])
+        monitoring_user, monitoring_pass = ensure_monitoring_user(es, run, elastic_pwd)
+        es.close()
+
     c = connect(ip)
     copy_scripts(c, roles=("kibana",))
     fleet_host = NODES["fleet"][1]
+    kibana_fqdn = NODES["kibana"][1]
     out = run(
         c,
         f"ELASTIC_PASS={shlex.quote(elastic_pwd)} FLEET_HOST={fleet_host} "
         f"FLEET_POLICY_NAME={shlex.quote(FLEET_POLICY_NAME)} "
         f"ES_POLICY_NAME={shlex.quote(ES_POLICY_NAME)} "
         f"KIBANA_POLICY_NAME={shlex.quote(KIBANA_POLICY_NAME)} "
+        f"MONITORING_USER={shlex.quote(monitoring_user)} "
+        f"MONITORING_PASS={shlex.quote(monitoring_pass)} "
+        f"KIBANA_HOST_FQDN={shlex.quote(kibana_fqdn)} "
+        f"ES_NODES_JSON={shlex.quote(_es_nodes_fleet_json())} "
         f"SETUP_PHASE={phase} bash {REMOTE}/setup-fleet-kibana.sh",
         timeout=600,
     )
@@ -485,8 +509,12 @@ def setup_agent_policies(elastic_pwd: str) -> dict:
 
     ensure_fleet_epr_ready(elastic_pwd)
     result = _run_fleet_setup(elastic_pwd, "agents")
-    if not result.get("ES_ENROLLMENT_TOKEN") or not result.get("KIBANA_ENROLLMENT_TOKEN"):
+    if not result.get("KIBANA_ENROLLMENT_TOKEN"):
         raise RuntimeError("Agent policy / enrollment token setup failed")
+    for _, fqdn in ES_NODES:
+        short = fqdn.split(".")[0]
+        if not result.get(f"ES_ENROLLMENT_TOKEN_{short}"):
+            raise RuntimeError(f"Missing enrollment token for ES node {fqdn}")
     print(f"  agent policies: ES={result.get('ES_POLICY_ID')} Kibana={result.get('KIBANA_POLICY_ID')}", flush=True)
     return result
 
@@ -643,13 +671,16 @@ def deploy_fleet_server(fleet_policy_id: str, svc_token: str, ca: str) -> bool:
 
 def deploy_agents(fleet_info: dict, ca: str):
     print("=== Phase 5: Elastic Agents on all nodes ===", flush=True)
-    es_tok = fleet_info.get("ES_ENROLLMENT_TOKEN", "")
     kb_tok = fleet_info.get("KIBANA_ENROLLMENT_TOKEN", "")
     fleet_url = f"https://{NODES['fleet'][1]}:8220"
     es_fqdn = NODES["es01"][1]
     ca_arg = f"--ca-file {REMOTE}/certs/http_ca.crt"
 
     for ip, fqdn in ES_NODES:
+        short = fqdn.split(".")[0]
+        es_tok = fleet_info.get(f"ES_ENROLLMENT_TOKEN_{short}") or fleet_info.get("ES_ENROLLMENT_TOKEN", "")
+        if not es_tok:
+            raise RuntimeError(f"Missing enrollment token for ES node {fqdn}")
         c = connect(ip)
         copy_scripts(c, roles=("elastic-agent",))
         install_es_ca_on_node(c, ca)

@@ -13,6 +13,10 @@ SETUP_PHASE="${SETUP_PHASE:-all}"
 FLEET_POLICY_NAME="${FLEET_POLICY_NAME:-Fleet-Server-Policy}"
 ES_POLICY_NAME="${ES_POLICY_NAME:-Elastic-Agents-ES}"
 KIBANA_POLICY_NAME="${KIBANA_POLICY_NAME:-Elastic-Agents-Kibana}"
+MONITORING_USER="${MONITORING_USER:-elastic_monitoring}"
+MONITORING_PASS="${MONITORING_PASS:-}"
+KIBANA_HOST_FQDN="${KIBANA_HOST_FQDN:-}"
+ES_NODES_JSON="${ES_NODES_JSON:-[]}"
 
 [[ -n "$ELASTIC_PASS" ]] || { echo "Set ELASTIC_PASS" >&2; exit 1; }
 
@@ -27,6 +31,7 @@ fi
 echo "Using Kibana API at ${KB} (phase=${SETUP_PHASE})" >&2
 export KB ELASTIC_USER ELASTIC_PASS FLEET_HOST SETUP_PHASE
 export FLEET_POLICY_NAME ES_POLICY_NAME KIBANA_POLICY_NAME
+export MONITORING_USER MONITORING_PASS KIBANA_HOST_FQDN ES_NODES_JSON
 
 python3 <<'PY'
 import json, os, time, urllib.error, urllib.request
@@ -37,6 +42,26 @@ fleet_host = os.environ["FLEET_HOST"]
 phase = os.environ.get("SETUP_PHASE", "all")
 do_fleet = phase in ("fleet-server", "all")
 do_agents = phase in ("agents", "all")
+monitoring_user = os.environ.get("MONITORING_USER", "elastic_monitoring")
+monitoring_pass = os.environ.get("MONITORING_PASS", "")
+kibana_host_fqdn = os.environ.get("KIBANA_HOST_FQDN", "")
+es_nodes = json.loads(os.environ.get("ES_NODES_JSON", "[]") or "[]")
+
+ES_SSL_YAML = """certificate_authorities:
+  - /etc/elasticsearch/certs/http_ca.crt
+verification_mode: certificate"""
+
+
+def var_text(value):
+    return {"value": value, "type": "text"}
+
+
+def var_password(value):
+    return {"value": value, "type": "password"}
+
+
+def var_yaml(value):
+    return {"value": value, "type": "yaml"}
 
 
 def api(method, path, body=None, retries=5):
@@ -200,6 +225,17 @@ def create_package_policy(body):
     api("POST", "/api/fleet/package_policies", body)
 
 
+def upsert_package_policy(policy_id, package_name, default_name, build_body):
+    existing = find_package_policy(policy_id, package_name)
+    body = build_body()
+    if existing:
+        try:
+            api("DELETE", f"/api/fleet/package_policies/{existing['id']}")
+        except Exception:
+            pass
+    create_package_policy(body)
+
+
 def ensure_fleet_server_integration(policy_id):
     if find_package_policy(policy_id, "fleet_server"):
         return
@@ -222,70 +258,87 @@ def ensure_fleet_server_integration(policy_id):
 
 
 def ensure_system_integration(policy_id, label):
-    if find_package_policy(policy_id, "system"):
-        return
     ver = latest_package_version("system")
-    create_package_policy({
-        "name": f"{label}-system",
-        "description": "Linux system logs and metrics",
-        "namespace": "default",
-        "policy_id": policy_id,
-        "enabled": True,
-        "package": {"name": "system", "version": ver},
-        "inputs": [
-            {"type": "system/metrics", "policy_template": "metrics", "enabled": True, "streams": []},
-            {"type": "logfile", "policy_template": "logs", "enabled": True, "streams": []},
-        ],
-    })
+
+    def build():
+        return {
+            "name": f"{label}-system",
+            "description": "Linux system logs and metrics",
+            "namespace": "default",
+            "policy_id": policy_id,
+            "enabled": True,
+            "package": {"name": "system", "version": ver},
+            "inputs": [
+                {"type": "system/metrics", "policy_template": "metrics", "enabled": True, "streams": []},
+                {"type": "logfile", "policy_template": "logs", "enabled": True, "streams": []},
+            ],
+        }
+
+    upsert_package_policy(policy_id, "system", f"{label}-system", build)
 
 
-def ensure_elasticsearch_integration(policy_id):
-    if find_package_policy(policy_id, "elasticsearch"):
-        return
+def ensure_elasticsearch_integration(policy_id, es_fqdn):
     ver = latest_package_version("elasticsearch")
-    create_package_policy({
-        "name": "es-node-elasticsearch",
-        "description": "Elasticsearch node metrics",
-        "namespace": "default",
-        "policy_id": policy_id,
-        "enabled": True,
-        "package": {"name": "elasticsearch", "version": ver},
-        "inputs": [
-            {
-                "type": "elasticsearch/metrics",
-                "policy_template": "elasticsearch",
-                "enabled": True,
-                "vars": {
-                    "hosts": {"value": ["https://localhost:9200"], "type": "text"},
-                    "scope": {"value": "node", "type": "text"},
+    es_url = f"https://{es_fqdn}:9200"
+    vars_body = {
+        "hosts": var_text([es_url]),
+        "scope": var_text("node"),
+        "ssl": var_yaml(ES_SSL_YAML),
+    }
+    if monitoring_pass:
+        vars_body["username"] = var_text(monitoring_user)
+        vars_body["password"] = var_password(monitoring_pass)
+
+    def build():
+        return {
+            "name": f"{es_fqdn.split('.')[0]}-elasticsearch",
+            "description": f"Elasticsearch node metrics ({es_fqdn})",
+            "namespace": "default",
+            "policy_id": policy_id,
+            "enabled": True,
+            "package": {"name": "elasticsearch", "version": ver},
+            "inputs": [
+                {
+                    "type": "elasticsearch/metrics",
+                    "policy_template": "elasticsearch",
+                    "enabled": True,
+                    "vars": vars_body,
+                    "streams": [],
                 },
-                "streams": [],
-            },
-        ],
-    })
+            ],
+        }
+
+    upsert_package_policy(policy_id, "elasticsearch", f"{es_fqdn.split('.')[0]}-elasticsearch", build)
 
 
-def ensure_kibana_integration(policy_id):
-    if find_package_policy(policy_id, "kibana"):
-        return
+def ensure_kibana_integration(policy_id, kb_fqdn):
     ver = latest_package_version("kibana")
-    create_package_policy({
-        "name": "kibana-node-kibana",
-        "description": "Kibana node metrics",
-        "namespace": "default",
-        "policy_id": policy_id,
-        "enabled": True,
-        "package": {"name": "kibana", "version": ver},
-        "inputs": [
-            {
-                "type": "kibana/metrics",
-                "policy_template": "kibana",
-                "enabled": True,
-                "vars": {"hosts": {"value": ["http://localhost:5601"], "type": "text"}},
-                "streams": [],
-            },
-        ],
-    })
+    kb_url = f"http://{kb_fqdn}:5601"
+    vars_body = {"hosts": var_text([kb_url])}
+    if monitoring_pass:
+        vars_body["username"] = var_text(monitoring_user)
+        vars_body["password"] = var_password(monitoring_pass)
+
+    def build():
+        return {
+            "name": f"{kb_fqdn.split('.')[0]}-kibana",
+            "description": f"Kibana node metrics ({kb_fqdn})",
+            "namespace": "default",
+            "policy_id": policy_id,
+            "enabled": True,
+            "package": {"name": "kibana", "version": ver},
+            "inputs": [
+                {
+                    "type": "kibana/metrics",
+                    "policy_template": "kibana",
+                    "enabled": True,
+                    "vars": vars_body,
+                    "streams": [],
+                },
+            ],
+        }
+
+    upsert_package_policy(policy_id, "kibana", f"{kb_fqdn.split('.')[0]}-kibana", build)
 
 
 def enroll_token(policy_id):
@@ -304,16 +357,31 @@ es_id = kb_id = None
 if do_agents:
     configure_fleet_hosts()
     wait_for_packages(["system", "elasticsearch", "kibana"])
-    es_id = ensure_policy(os.environ["ES_POLICY_NAME"], "ES node agents")
-    kb_id = ensure_policy(os.environ["KIBANA_POLICY_NAME"], "Kibana node agent")
 
-    safe_integration("es-system", lambda: ensure_system_integration(es_id, "es"))
-    safe_integration("es-elasticsearch", lambda: ensure_elasticsearch_integration(es_id))
+    if not es_nodes:
+        es_nodes = [{"fqdn": "localhost", "short": "es", "policy_name": os.environ["ES_POLICY_NAME"]}]
+
+    for node in es_nodes:
+        fqdn = node["fqdn"]
+        short = node.get("short") or fqdn.split(".")[0]
+        policy_name = node.get("policy_name") or f"{os.environ['ES_POLICY_NAME']}-{short}"
+        es_id = ensure_policy(policy_name, f"ES node agent ({fqdn})")
+        safe_integration(f"es-system-{short}", lambda pid=es_id, s=short: ensure_system_integration(pid, s))
+        safe_integration(
+            f"es-elasticsearch-{short}",
+            lambda pid=es_id, f=fqdn: ensure_elasticsearch_integration(pid, f),
+        )
+        print(f"ES_POLICY_ID_{short}={es_id}")
+        print(f"ES_ENROLLMENT_TOKEN_{short}={enroll_token(es_id)}")
+
+    if es_nodes:
+        print(f"ES_POLICY_ID={es_id}")
+
+    kb_fqdn = kibana_host_fqdn or "localhost"
+    kb_id = ensure_policy(os.environ["KIBANA_POLICY_NAME"], f"Kibana node agent ({kb_fqdn})")
     safe_integration("kibana-system", lambda: ensure_system_integration(kb_id, "kibana"))
-    safe_integration("kibana-kibana", lambda: ensure_kibana_integration(kb_id))
+    safe_integration("kibana-kibana", lambda: ensure_kibana_integration(kb_id, kb_fqdn))
 
-    print(f"ES_POLICY_ID={es_id}")
     print(f"KIBANA_POLICY_ID={kb_id}")
-    print(f"ES_ENROLLMENT_TOKEN={enroll_token(es_id)}")
     print(f"KIBANA_ENROLLMENT_TOKEN={enroll_token(kb_id)}")
 PY

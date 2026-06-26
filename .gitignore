@@ -2,6 +2,7 @@
 config.psd1
 secrets/*
 !secrets/elastic-password.example
+!secrets/monitoring-password.example
 kickstart/generated/
 
 # Python
