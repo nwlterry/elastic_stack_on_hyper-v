@@ -374,16 +374,22 @@ def _patch_lens_state(state: dict) -> bool:
     return changed
 
 
-def patch_ingest_pipeline_dashboard(kb, auth: str) -> None:
-    """Patch Fleet-managed Ingest Pipeline dashboard Lens panels."""
-    print("=== Patch Ingest Pipeline dashboard Lens panels ===", flush=True)
-    resp = kibana_curl(kb, auth, "GET", f"/api/saved_objects/dashboard/{INGEST_PIPELINE_DASHBOARD}")
-    if resp.get("statusCode", 200) >= 400:
-        print(f"  WARN dashboard fetch failed: {resp}", flush=True)
-        return
-    attrs = resp.get("attributes", {})
+def list_elasticsearch_dashboards(kb, auth: str) -> list[dict]:
+    """Return Fleet [Elasticsearch] dashboards (managed package assets)."""
+    resp = kibana_curl(
+        kb,
+        auth,
+        "GET",
+        "/api/saved_objects/_find?type=dashboard&per_page=100&search_fields=title&search=%5BElasticsearch%5D",
+    )
+    return resp.get("saved_objects", [])
+
+
+def _patch_dashboard_lens_panels(attrs: dict) -> tuple[dict, list[str], int]:
+    """Normalize/patch all Lens panels; returns (attrs, patched_titles, corrupt_fixed)."""
     panels = json.loads(attrs.get("panelsJSON", "[]"))
     patched_titles: list[str] = []
+    corrupt_fixed = 0
     for panel in panels:
         if panel.get("type") != "lens":
             continue
@@ -392,6 +398,8 @@ def patch_ingest_pipeline_dashboard(kb, auth: str) -> None:
         state_raw = lens_attrs.get("state")
         if not state_raw:
             continue
+        if isinstance(state_raw, dict):
+            corrupt_fixed += 1
         state = json.loads(state_raw) if isinstance(state_raw, str) else dict(state_raw)
         needs_write = not isinstance(state_raw, str) or _patch_lens_state(state)
         if not needs_write:
@@ -400,21 +408,55 @@ def patch_ingest_pipeline_dashboard(kb, auth: str) -> None:
         emb["attributes"] = lens_attrs
         panel["embeddableConfig"] = emb
         patched_titles.append(panel.get("title") or panel.get("id", "lens"))
-    if not patched_titles:
-        print("  no lens panels needed patching", flush=True)
-        return
-    attrs["panelsJSON"] = json.dumps(panels)
-    put = kibana_curl(
-        kb,
-        auth,
-        "PUT",
-        f"/api/saved_objects/dashboard/{INGEST_PIPELINE_DASHBOARD}?overwrite=true",
-        {"attributes": attrs},
-    )
-    if put.get("statusCode", 200) >= 400:
-        print(f"  WARN dashboard update failed: {put}", flush=True)
-        return
-    print(f"  patched lens panels: {', '.join(patched_titles)}", flush=True)
+    if patched_titles:
+        attrs = dict(attrs)
+        attrs["panelsJSON"] = json.dumps(panels)
+    return attrs, patched_titles, corrupt_fixed
+
+
+def patch_elasticsearch_dashboards(kb, auth: str) -> bool:
+    """Patch all Fleet [Elasticsearch] dashboards (Lens state + ingest pipeline fixes)."""
+    print("=== Patch [Elasticsearch] dashboard Lens panels ===", flush=True)
+    ok = True
+    dashboards = list_elasticsearch_dashboards(kb, auth)
+    if not dashboards:
+        print("  WARN no [Elasticsearch] dashboards found", flush=True)
+        return False
+    for item in dashboards:
+        did = item["id"]
+        title = item.get("attributes", {}).get("title", did)
+        resp = kibana_curl(kb, auth, "GET", f"/api/saved_objects/dashboard/{did}")
+        if resp.get("statusCode", 200) >= 400:
+            print(f"  WARN fetch failed {title}: {resp.get('message', resp)[:120]}", flush=True)
+            ok = False
+            continue
+        attrs = resp.get("attributes", {})
+        new_attrs, patched_titles, corrupt_fixed = _patch_dashboard_lens_panels(attrs)
+        if not patched_titles:
+            print(f"  skip {title}: lens panels already normalized", flush=True)
+            continue
+        put = kibana_curl(
+            kb,
+            auth,
+            "PUT",
+            f"/api/saved_objects/dashboard/{did}?overwrite=true",
+            {"attributes": new_attrs},
+        )
+        if put.get("statusCode", 200) >= 400:
+            print(f"  FAIL {title}: {put.get('message', put)[:200]}", flush=True)
+            ok = False
+            continue
+        print(
+            f"  OK {title}: panels={len(patched_titles)} "
+            f"corrupt_state_fixed={corrupt_fixed}",
+            flush=True,
+        )
+    return ok
+
+
+def patch_ingest_pipeline_dashboard(kb, auth: str) -> None:
+    """Backward-compatible entry point for ingest pipeline dashboard patching."""
+    patch_elasticsearch_dashboards(kb, auth)
 
 
 def verify_controls_api(kb, auth: str) -> bool:
@@ -455,6 +497,96 @@ def verify_controls_api(kb, auth: str) -> bool:
                 f"{len(suggestions)} options (e.g. {suggestions[0]['value']})",
                 flush=True,
             )
+    return ok
+
+
+def verify_elasticsearch_dashboards(kb, auth: str) -> bool:
+    """Ensure all [Elasticsearch] dashboards have string Lens state and working controls."""
+    print("=== Verify [Elasticsearch] dashboards ===", flush=True)
+    ok = True
+    dv_index: dict[str, str] = {}
+    for vid in (INGEST_PIPELINE_DATA_VIEW, "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9"):
+        dv = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{vid}").get("data_view", {})
+        if dv:
+            dv_index[vid] = dv.get("title", vid)
+
+    for item in list_elasticsearch_dashboards(kb, auth):
+        did = item["id"]
+        title = item.get("attributes", {}).get("title", did)
+        dash = kibana_curl(kb, auth, "GET", f"/api/saved_objects/dashboard/{did}")
+        attrs = dash.get("attributes", {})
+        panels = json.loads(attrs.get("panelsJSON", "[]"))
+        corrupt = 0
+        lens_count = 0
+        for panel in panels:
+            if panel.get("type") != "lens":
+                continue
+            lens_count += 1
+            state_raw = panel.get("embeddableConfig", {}).get("attributes", {}).get("state")
+            if isinstance(state_raw, dict):
+                corrupt += 1
+        if corrupt:
+            print(f"  FAIL {title}: corrupt_lens_state={corrupt}/{lens_count}", flush=True)
+            ok = False
+        else:
+            print(f"  OK {title}: lens={lens_count} corrupt=0", flush=True)
+
+        control_fields: list[str] = []
+        ctrl_input = attrs.get("controlGroupInput")
+        if ctrl_input:
+            try:
+                cg = json.loads(ctrl_input) if isinstance(ctrl_input, str) else ctrl_input
+                cpanels = (
+                    json.loads(cg.get("panelsJSON", "{}"))
+                    if isinstance(cg.get("panelsJSON"), str)
+                    else cg.get("panelsJSON", {})
+                )
+                for cp in cpanels.values():
+                    if cp.get("type") == "optionsListControl":
+                        field = cp.get("explicitInput", {}).get("fieldName", "")
+                        if field:
+                            control_fields.append(field)
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                print(f"  FAIL {title}: corrupt controlGroupInput", flush=True)
+                ok = False
+                continue
+
+        dv_refs = {
+            r["id"]
+            for r in dash.get("references", [])
+            if r.get("type") == "index-pattern" and "controlGroup" in r.get("name", "")
+        }
+        ctrl_index = dv_index.get(next(iter(dv_refs), ""), "")
+        if not ctrl_index and INGEST_PIPELINE_DATA_VIEW in {
+            r["id"] for r in dash.get("references", []) if r.get("type") == "index-pattern"
+        }:
+            ctrl_index = dv_index.get(INGEST_PIPELINE_DATA_VIEW, "")
+        if not ctrl_index:
+            ctrl_index = dv_index.get("befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9", "")
+
+        for field in control_fields:
+            body = {
+                "size": 50,
+                "fieldName": field,
+                "allowExpensiveQueries": True,
+                "filters": [{"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}}],
+                "selectedOptions": [],
+                "searchString": "",
+            }
+            resp = kibana_curl(kb, auth, "POST", f"/internal/controls/optionsList/{ctrl_index}", body)
+            suggestions = resp.get("suggestions") or []
+            if resp.get("statusCode", 200) >= 400 or not suggestions:
+                print(
+                    f"  FAIL {title}: control {field} on {ctrl_index}: "
+                    f"{resp.get('message', resp)[:120]}",
+                    flush=True,
+                )
+                ok = False
+            else:
+                print(
+                    f"  OK {title}: control {field} ({len(suggestions)} options)",
+                    flush=True,
+                )
     return ok
 
 
@@ -596,11 +728,12 @@ def main() -> int:
     for view_id in DATA_VIEWS:
         patch_data_view(kb, auth, view_id)
 
-    patch_ingest_pipeline_dashboard(kb, auth)
+    patch_elasticsearch_dashboards(kb, auth)
 
     ok = (
         verify_dashboard_search(kb, auth)
         and verify_controls_api(kb, auth)
+        and verify_elasticsearch_dashboards(kb, auth)
         and verify_ingest_pipeline_dashboard(kb, auth)
         and _search_ok(kb, auth, "processor panel scope", INGEST_PIPELINE_INDEX, {
             "size": 0,
