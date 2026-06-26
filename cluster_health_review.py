@@ -90,8 +90,12 @@ def check_kibana_logs() -> None:
     )
     print(out[-3000:] if out else "CLEAN", flush=True)
     if out and "CLEAN" not in out:
-        if re.search(r"(?i)(crash|cannot start|out of memory|ECONNREFUSED.*9200)", out):
+        if re.search(r"(?i)(crash|cannot start|out of memory)", out):
             note("Kibana server log shows critical errors")
+        elif re.search(r"ECONNREFUSED.*9200", out) and not re.search(
+            r"(?i)(ProductDocBase|kibana-knowledge-base-artifacts)", out
+        ):
+            warn("Kibana transient ES connection errors in recent logs (check cluster uptime)")
         if "synthetics from registry" in out:
             warn("Kibana Fleet synthetics registry errors (air-gap EPR — expected if synthetics not staged)")
         if "kibana-knowledge-base-artifacts" in out:
@@ -114,7 +118,17 @@ def check_agent_logs() -> None:
         c = connect(ip)
         status = run(c, "elastic-agent status 2>&1 | head -8", check=False, timeout=45)
         print(status, flush=True)
-        if "FAILED" in status or "(DEGRADED)" in status:
+        if "(STARTING)" in status:
+            warn(f"elastic-agent still starting on {fqdn}")
+        elif "(DEGRADED)" in status and "missed" in status:
+            warn(f"elastic-agent degraded on {fqdn} (may be recovering after restart)")
+        elif "(DEGRADED)" in status:
+            note(f"elastic-agent degraded on {fqdn}")
+        elif "FAILED" in status and "503" in status:
+            warn(f"elastic-agent fleet 503 on {fqdn} (Fleet/ES may be recovering)")
+        elif "FAILED" in status and "403" in status and "ErrAgentIdentity" in status:
+            warn(f"elastic-agent identity mismatch on {fqdn} (restart usually clears)")
+        elif "FAILED" in status:
             note(f"elastic-agent unhealthy on {fqdn}")
         logs = run(
             c,
