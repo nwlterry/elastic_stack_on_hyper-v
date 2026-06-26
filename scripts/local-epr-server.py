@@ -50,6 +50,13 @@ PACKAGES = {
         "policy_templates": [{"name": "kibana", "title": "Kibana", "description": "Kibana"}],
         "categories": ["observability"],
     },
+    "synthetics": {
+        "title": "Elastic Synthetics",
+        "version": "1.3.0",
+        "description": "Synthetics integration metadata for air-gapped Fleet.",
+        "policy_templates": [{"name": "synthetics", "title": "Synthetics", "description": "Synthetics"}],
+        "categories": ["observability"],
+    },
 }
 
 

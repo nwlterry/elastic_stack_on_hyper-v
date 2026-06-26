@@ -15,6 +15,7 @@ declare -A PACKAGES=(
   [system]=1.60.0
   [elasticsearch]=1.12.0
   [kibana]=2.3.1
+  [synthetics]=1.3.0
 )
 
 fetch_or_copy() {
@@ -60,7 +61,7 @@ fetch_or_copy() {
 }
 
 missing=0
-for name in fleet_server elastic_agent system elasticsearch kibana; do
+for name in fleet_server elastic_agent system elasticsearch kibana synthetics; do
   fetch_or_copy "$name" "${PACKAGES[$name]}" || missing=$((missing + 1))
 done
 

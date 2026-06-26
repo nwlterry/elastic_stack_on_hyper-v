@@ -90,6 +90,26 @@ def required_integrations(es_policy_map: dict[str, str], kibana_policy_id: str |
     return required
 
 
+def integrations_have_streams(kb, elastic_pwd: str, policy_ids: set[str] | None = None) -> bool:
+    for pkg in get_package_policies(kb, elastic_pwd):
+        pid = pkg.get("policy_id")
+        if policy_ids and pid not in policy_ids:
+            continue
+        pname = pkg.get("package", {}).get("name")
+        if pname not in ("system", "elasticsearch", "kibana"):
+            continue
+        for inp in pkg.get("inputs", []):
+            if not inp.get("enabled", True):
+                continue
+            if not inp.get("streams"):
+                print(
+                    f"  policy {pid} {pname}/{inp.get('type')} has empty streams",
+                    flush=True,
+                )
+                return False
+    return True
+
+
 def integrations_satisfied(kb, elastic_pwd: str, required: dict[str, set[str]]) -> bool:
     by_policy: dict[str, set[str]] = {pid: set() for pid in required}
     for pkg in get_package_policies(kb, elastic_pwd):
@@ -102,6 +122,8 @@ def integrations_satisfied(kb, elastic_pwd: str, required: dict[str, set[str]]) 
         if not need.issubset(have):
             print(f"  policy {pid}: have={sorted(have)} need={sorted(need)}", flush=True)
             return False
+    if not integrations_have_streams(kb, elastic_pwd, set(required)):
+        return False
     return True
 
 

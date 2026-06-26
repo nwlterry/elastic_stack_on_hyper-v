@@ -113,6 +113,10 @@ def copy_scripts(c, roles: tuple[str, ...] = ("elasticsearch", "kibana", "elasti
             scp.put(str(f), f"{REMOTE}/{f.name}")
         for f in SCRIPTS.glob("*.py"):
             scp.put(str(f), f"{REMOTE}/{f.name}")
+        for helper in ("integration_streams.py",):
+            path = ROOT / helper
+            if path.is_file():
+                scp.put(str(path), f"{REMOTE}/{helper}")
         pkg = ROOT / "packages"
         if pkg.is_dir():
             epr_local = pkg / "epr"

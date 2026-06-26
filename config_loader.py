@@ -19,6 +19,7 @@ EPR_PACKAGES = {
     "system": "1.60.0",
     "elasticsearch": "1.12.0",
     "kibana": "2.3.1",
+    "synthetics": "1.3.0",
 }
 
 

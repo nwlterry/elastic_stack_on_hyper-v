@@ -34,7 +34,10 @@ export FLEET_POLICY_NAME ES_POLICY_NAME KIBANA_POLICY_NAME
 export MONITORING_USER MONITORING_PASS KIBANA_HOST_FQDN ES_NODES_JSON
 
 python3 <<'PY'
-import json, os, time, urllib.error, urllib.request
+import json, os, sys, time, urllib.error, urllib.request
+
+sys.path.insert(0, "/opt/elastic-setup")
+from integration_streams import elasticsearch_input, kibana_inputs, system_inputs
 
 kb = os.environ["KB"]
 user, pwd = os.environ["ELASTIC_USER"], os.environ["ELASTIC_PASS"]
@@ -268,10 +271,7 @@ def ensure_system_integration(policy_id, label):
             "policy_id": policy_id,
             "enabled": True,
             "package": {"name": "system", "version": ver},
-            "inputs": [
-                {"type": "system/metrics", "policy_template": "metrics", "enabled": True, "streams": []},
-                {"type": "logfile", "policy_template": "logs", "enabled": True, "streams": []},
-            ],
+            "inputs": system_inputs(),
         }
 
     upsert_package_policy(policy_id, "system", f"{label}-system", build)
@@ -290,6 +290,8 @@ def ensure_elasticsearch_integration(policy_id, es_fqdn):
         vars_body["password"] = var_password(monitoring_pass)
 
     def build():
+        es_input = elasticsearch_input()
+        es_input["vars"] = vars_body
         return {
             "name": f"{es_fqdn.split('.')[0]}-elasticsearch",
             "description": f"Elasticsearch node metrics ({es_fqdn})",
@@ -297,15 +299,7 @@ def ensure_elasticsearch_integration(policy_id, es_fqdn):
             "policy_id": policy_id,
             "enabled": True,
             "package": {"name": "elasticsearch", "version": ver},
-            "inputs": [
-                {
-                    "type": "elasticsearch/metrics",
-                    "policy_template": "elasticsearch",
-                    "enabled": True,
-                    "vars": vars_body,
-                    "streams": [],
-                },
-            ],
+            "inputs": [es_input],
         }
 
     upsert_package_policy(policy_id, "elasticsearch", f"{es_fqdn.split('.')[0]}-elasticsearch", build)
@@ -320,6 +314,10 @@ def ensure_kibana_integration(policy_id, kb_fqdn):
         vars_body["password"] = var_password(monitoring_pass)
 
     def build():
+        inputs = kibana_inputs()
+        for inp in inputs:
+            if inp.get("type") == "kibana/metrics":
+                inp["vars"] = vars_body
         return {
             "name": f"{kb_fqdn.split('.')[0]}-kibana",
             "description": f"Kibana node metrics ({kb_fqdn})",
@@ -327,15 +325,7 @@ def ensure_kibana_integration(policy_id, kb_fqdn):
             "policy_id": policy_id,
             "enabled": True,
             "package": {"name": "kibana", "version": ver},
-            "inputs": [
-                {
-                    "type": "kibana/metrics",
-                    "policy_template": "kibana",
-                    "enabled": True,
-                    "vars": vars_body,
-                    "streams": [],
-                },
-            ],
+            "inputs": inputs,
         }
 
     upsert_package_policy(policy_id, "kibana", f"{kb_fqdn.split('.')[0]}-kibana", build)
