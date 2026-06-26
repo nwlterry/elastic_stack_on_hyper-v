@@ -551,18 +551,24 @@ def verify_elasticsearch_dashboards(kb, auth: str) -> bool:
                 ok = False
                 continue
 
-        dv_refs = {
+        ctrl_dv_ids = [
             r["id"]
             for r in dash.get("references", [])
             if r.get("type") == "index-pattern" and "controlGroup" in r.get("name", "")
-        }
-        ctrl_index = dv_index.get(next(iter(dv_refs), ""), "")
-        if not ctrl_index and INGEST_PIPELINE_DATA_VIEW in {
-            r["id"] for r in dash.get("references", []) if r.get("type") == "index-pattern"
-        }:
-            ctrl_index = dv_index.get(INGEST_PIPELINE_DATA_VIEW, "")
+        ]
+        ctrl_index = ""
+        for dv_id in ctrl_dv_ids:
+            if dv_id in dv_index:
+                ctrl_index = dv_index[dv_id]
+                break
         if not ctrl_index:
-            ctrl_index = dv_index.get("befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9", "")
+            panel_dv_ids = {
+                r["id"] for r in dash.get("references", []) if r.get("type") == "index-pattern"
+            }
+            if INGEST_PIPELINE_DATA_VIEW in panel_dv_ids:
+                ctrl_index = dv_index.get(INGEST_PIPELINE_DATA_VIEW, "")
+            elif "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9" in panel_dv_ids:
+                ctrl_index = dv_index.get("befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9", "")
 
         for field in control_fields:
             body = {

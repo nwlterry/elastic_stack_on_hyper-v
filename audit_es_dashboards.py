@@ -109,11 +109,27 @@ for d in dashboards:
     if corrupt_lens:
         issues.append(f"{title}: {corrupt_lens} lens panel(s) with dict state")
 
-    # Test controls if present
+    # Test controls if present (use control group's data view, not a hardcoded index)
     if control_fields:
-        dv_title = "metrics-elasticsearch.stack_monitoring-*"
-        es_dv = kb_api("GET", "/api/data_views/data_view/elasticsearch-sm-metrics").get("data_view", {})
-        idx = es_dv.get("title") or dv_title
+        dv_index_map = {}
+        for vid in ("elasticsearch-sm-metrics", "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9"):
+            dv = kb_api("GET", f"/api/data_views/data_view/{vid}").get("data_view", {})
+            if dv:
+                dv_index_map[vid] = dv.get("title", vid)
+        ctrl_dv_ids = [
+            r["id"]
+            for r in dash.get("references", [])
+            if r.get("type") == "index-pattern" and "controlGroup" in r.get("name", "")
+        ]
+        idx = ""
+        for dv_id in ctrl_dv_ids:
+            if dv_id in dv_index_map:
+                idx = dv_index_map[dv_id]
+                break
+        if not idx:
+            idx = dv_index_map.get("elasticsearch-sm-metrics") or dv_index_map.get(
+                "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9", ""
+            )
         for field in control_fields[:3]:
             body = {
                 "size": 50,
