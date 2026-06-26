@@ -49,6 +49,16 @@ PACKAGES = (("elasticsearch", "1.12.0"),)
 INGEST_PIPELINE_KQL = (
     'service.type:elasticsearch or data_stream.dataset:"elasticsearch.ingest_pipeline"'
 )
+PROCESSOR_EXISTS_FIELD = "elasticsearch.ingest_pipeline.processor.type_tag"
+PIPELINE_EXISTS_FIELD = "elasticsearch.ingest_pipeline.total.count"
+PROCESSOR_PANEL_KQL = (
+    "(service.type:elasticsearch or data_stream.dataset:\"elasticsearch.ingest_pipeline\") "
+    f"and {PROCESSOR_EXISTS_FIELD}:*"
+)
+PIPELINE_PANEL_KQL = (
+    "(service.type:elasticsearch or data_stream.dataset:\"elasticsearch.ingest_pipeline\") "
+    f"and {PIPELINE_EXISTS_FIELD}:*"
+)
 
 # Broad pattern causes multi_terms type conflicts between ingest_pipeline (long
 # order_index) and stack_monitoring indices; only ingest dashboards use this view.
@@ -59,6 +69,14 @@ INGEST_PIPELINE_DASHBOARD = "elasticsearch-ea5b81a0-7fbf-11ed-8509-ddabeb9daeaf"
 # Processor-level docs lack pipeline total.count; Lens orderAgg must use processor.count.
 PIPELINE_TOTAL_COUNT_FIELD = "elasticsearch.ingest_pipeline.total.count"
 PROCESSOR_COUNT_FIELD = "elasticsearch.ingest_pipeline.processor.count"
+COUNTER_COUNT_FIELDS = frozenset(
+    {
+        PIPELINE_TOTAL_COUNT_FIELD,
+        PROCESSOR_COUNT_FIELD,
+        "elasticsearch.ingest_pipeline.total.failed",
+        "elasticsearch.ingest_pipeline.processor.failed",
+    }
+)
 
 CONTROL_FIELDS = (
     "elasticsearch.cluster.name",
@@ -248,19 +266,84 @@ def _search_ok(kb, auth: str, label: str, index: str, body: dict) -> bool:
     return True
 
 
-def _patch_lens_processor_order_agg(state: dict) -> bool:
-    """Fix processor breakdown panels that order by pipeline total.count (always null)."""
-    changed = False
+def _iter_lens_columns(state: dict):
     layers = state.get("datasourceStates", {}).get("formBased", {}).get("layers", {})
     for layer in layers.values():
         for col in layer.get("columns", {}).values():
-            if col.get("operationType") != "terms":
-                continue
-            if "processor" not in (col.get("sourceField") or ""):
-                continue
-            order_agg = col.get("params", {}).get("orderAgg")
-            if not order_agg or order_agg.get("sourceField") != PIPELINE_TOTAL_COUNT_FIELD:
-                continue
+            yield col
+
+
+def _column_text(col: dict) -> str:
+    parts = [col.get("sourceField") or "", col.get("params", {}).get("formula", "")]
+    order_agg = col.get("params", {}).get("orderAgg") or {}
+    parts.append(order_agg.get("sourceField") or "")
+    return " ".join(parts)
+
+
+def _panel_uses_processor_fields(state: dict) -> bool:
+    return any("ingest_pipeline.processor" in _column_text(col) for col in _iter_lens_columns(state))
+
+
+def _panel_uses_pipeline_total_fields(state: dict) -> bool:
+    return any("ingest_pipeline.total" in _column_text(col) for col in _iter_lens_columns(state))
+
+
+def _exists_filter(field: str) -> dict:
+    return {
+        "$state": {"store": "appState"},
+        "meta": {
+            "alias": None,
+            "disabled": False,
+            "negate": False,
+            "index": INGEST_PIPELINE_DATA_VIEW,
+            "key": field,
+            "type": "exists",
+        },
+        "query": {"exists": {"field": field}},
+    }
+
+
+def _patch_lens_panel_queries(state: dict) -> bool:
+    """Scope queries to processor vs pipeline doc types (mutually exclusive in this index)."""
+    if _panel_uses_processor_fields(state):
+        target = PROCESSOR_PANEL_KQL
+        exists_field = PROCESSOR_EXISTS_FIELD
+    elif _panel_uses_pipeline_total_fields(state):
+        target = PIPELINE_PANEL_KQL
+        exists_field = PIPELINE_EXISTS_FIELD
+    else:
+        return False
+    changed = False
+    query = state.setdefault("query", {"language": "kuery", "query": ""})
+    if query.get("query") != target:
+        query["language"] = "kuery"
+        query["query"] = target
+        changed = True
+    filters = state.setdefault("filters", [])
+    has_exists = any(
+        f.get("meta", {}).get("type") == "exists"
+        and f.get("meta", {}).get("key") == exists_field
+        for f in filters
+    )
+    if not has_exists:
+        filters.append(_exists_filter(exists_field))
+        changed = True
+    return changed
+
+
+def _patch_lens_order_aggs(state: dict) -> bool:
+    """Fix order-by metrics that are null or invalid for the doc type in each panel."""
+    uses_processor = _panel_uses_processor_fields(state)
+    changed = False
+    for col in _iter_lens_columns(state):
+        if col.get("operationType") != "terms":
+            continue
+        order_agg = col.get("params", {}).get("orderAgg")
+        if not order_agg:
+            continue
+        source = order_agg.get("sourceField")
+        # Processor panels: pipeline total.count is always null on processor docs.
+        if uses_processor and source == PIPELINE_TOTAL_COUNT_FIELD:
             order_agg["sourceField"] = PROCESSOR_COUNT_FIELD
             label = order_agg.get("label", "")
             if PIPELINE_TOTAL_COUNT_FIELD in label:
@@ -269,12 +352,26 @@ def _patch_lens_processor_order_agg(state: dict) -> bool:
                     PROCESSOR_COUNT_FIELD,
                 )
             changed = True
+            source = PROCESSOR_COUNT_FIELD
+        # TSDS counter fields: Lens/ES behave more reliably with max than sum for ordering.
+        if order_agg.get("operationType") == "sum" and source in COUNTER_COUNT_FIELDS:
+            order_agg["operationType"] = "max"
+            label = order_agg.get("label", "")
+            if label.startswith("Sum of "):
+                order_agg["label"] = label.replace("Sum of ", "Maximum of ", 1)
+            changed = True
+    return changed
+
+
+def _patch_lens_state(state: dict) -> bool:
+    changed = _patch_lens_panel_queries(state)
+    changed = _patch_lens_order_aggs(state) or changed
     return changed
 
 
 def patch_ingest_pipeline_dashboard(kb, auth: str) -> None:
-    """Patch Fleet-managed Ingest Pipeline dashboard processor Lens panels."""
-    print("=== Patch Ingest Pipeline dashboard processor panels ===", flush=True)
+    """Patch Fleet-managed Ingest Pipeline dashboard Lens panels."""
+    print("=== Patch Ingest Pipeline dashboard Lens panels ===", flush=True)
     resp = kibana_curl(kb, auth, "GET", f"/api/saved_objects/dashboard/{INGEST_PIPELINE_DASHBOARD}")
     if resp.get("statusCode", 200) >= 400:
         print(f"  WARN dashboard fetch failed: {resp}", flush=True)
@@ -291,14 +388,14 @@ def patch_ingest_pipeline_dashboard(kb, auth: str) -> None:
         if not state_raw:
             continue
         state = json.loads(state_raw) if isinstance(state_raw, str) else dict(state_raw)
-        if not _patch_lens_processor_order_agg(state):
+        if not _patch_lens_state(state):
             continue
         lens_attrs["state"] = json.dumps(state)
         emb["attributes"] = lens_attrs
         panel["embeddableConfig"] = emb
         patched_titles.append(panel.get("title") or panel.get("id", "lens"))
     if not patched_titles:
-        print("  no processor panels needed patching", flush=True)
+        print("  no lens panels needed patching", flush=True)
         return
     attrs["panelsJSON"] = json.dumps(panels)
     put = kibana_curl(
@@ -311,7 +408,7 @@ def patch_ingest_pipeline_dashboard(kb, auth: str) -> None:
     if put.get("statusCode", 200) >= 400:
         print(f"  WARN dashboard update failed: {put}", flush=True)
         return
-    print(f"  patched orderAgg on: {', '.join(patched_titles)}", flush=True)
+    print(f"  patched lens panels: {', '.join(patched_titles)}", flush=True)
 
 
 def verify_controls_api(kb, auth: str) -> bool:
@@ -499,6 +596,30 @@ def main() -> int:
         verify_dashboard_search(kb, auth)
         and verify_controls_api(kb, auth)
         and verify_ingest_pipeline_dashboard(kb, auth)
+        and _search_ok(kb, auth, "processor panel scope", INGEST_PIPELINE_INDEX, {
+            "size": 0,
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}},
+                        {"query_string": {"query": INGEST_PIPELINE_KQL}},
+                        {"exists": {"field": PROCESSOR_EXISTS_FIELD}},
+                    ]
+                }
+            },
+        })
+        and _search_ok(kb, auth, "pipeline panel scope", INGEST_PIPELINE_INDEX, {
+            "size": 0,
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}},
+                        {"query_string": {"query": INGEST_PIPELINE_KQL}},
+                        {"exists": {"field": PIPELINE_EXISTS_FIELD}},
+                    ]
+                }
+            },
+        })
     )
     kb.close()
     return 0 if ok else 1
