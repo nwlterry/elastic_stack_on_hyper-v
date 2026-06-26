@@ -54,6 +54,11 @@ INGEST_PIPELINE_KQL = (
 # order_index) and stack_monitoring indices; only ingest dashboards use this view.
 INGEST_PIPELINE_INDEX = "metrics-elasticsearch.ingest_pipeline-*"
 INGEST_PIPELINE_DATA_VIEW = "elasticsearch-sm-metrics"
+INGEST_PIPELINE_DASHBOARD = "elasticsearch-ea5b81a0-7fbf-11ed-8509-ddabeb9daeaf"
+
+# Processor-level docs lack pipeline total.count; Lens orderAgg must use processor.count.
+PIPELINE_TOTAL_COUNT_FIELD = "elasticsearch.ingest_pipeline.total.count"
+PROCESSOR_COUNT_FIELD = "elasticsearch.ingest_pipeline.processor.count"
 
 CONTROL_FIELDS = (
     "elasticsearch.cluster.name",
@@ -243,6 +248,72 @@ def _search_ok(kb, auth: str, label: str, index: str, body: dict) -> bool:
     return True
 
 
+def _patch_lens_processor_order_agg(state: dict) -> bool:
+    """Fix processor breakdown panels that order by pipeline total.count (always null)."""
+    changed = False
+    layers = state.get("datasourceStates", {}).get("formBased", {}).get("layers", {})
+    for layer in layers.values():
+        for col in layer.get("columns", {}).values():
+            if col.get("operationType") != "terms":
+                continue
+            if "processor" not in (col.get("sourceField") or ""):
+                continue
+            order_agg = col.get("params", {}).get("orderAgg")
+            if not order_agg or order_agg.get("sourceField") != PIPELINE_TOTAL_COUNT_FIELD:
+                continue
+            order_agg["sourceField"] = PROCESSOR_COUNT_FIELD
+            label = order_agg.get("label", "")
+            if PIPELINE_TOTAL_COUNT_FIELD in label:
+                order_agg["label"] = label.replace(
+                    PIPELINE_TOTAL_COUNT_FIELD,
+                    PROCESSOR_COUNT_FIELD,
+                )
+            changed = True
+    return changed
+
+
+def patch_ingest_pipeline_dashboard(kb, auth: str) -> None:
+    """Patch Fleet-managed Ingest Pipeline dashboard processor Lens panels."""
+    print("=== Patch Ingest Pipeline dashboard processor panels ===", flush=True)
+    resp = kibana_curl(kb, auth, "GET", f"/api/saved_objects/dashboard/{INGEST_PIPELINE_DASHBOARD}")
+    if resp.get("statusCode", 200) >= 400:
+        print(f"  WARN dashboard fetch failed: {resp}", flush=True)
+        return
+    attrs = resp.get("attributes", {})
+    panels = json.loads(attrs.get("panelsJSON", "[]"))
+    patched_titles: list[str] = []
+    for panel in panels:
+        if panel.get("type") != "lens":
+            continue
+        emb = panel.get("embeddableConfig", {})
+        lens_attrs = emb.get("attributes", {})
+        state_raw = lens_attrs.get("state")
+        if not state_raw:
+            continue
+        state = json.loads(state_raw) if isinstance(state_raw, str) else dict(state_raw)
+        if not _patch_lens_processor_order_agg(state):
+            continue
+        lens_attrs["state"] = json.dumps(state)
+        emb["attributes"] = lens_attrs
+        panel["embeddableConfig"] = emb
+        patched_titles.append(panel.get("title") or panel.get("id", "lens"))
+    if not patched_titles:
+        print("  no processor panels needed patching", flush=True)
+        return
+    attrs["panelsJSON"] = json.dumps(panels)
+    put = kibana_curl(
+        kb,
+        auth,
+        "PUT",
+        f"/api/saved_objects/dashboard/{INGEST_PIPELINE_DASHBOARD}?overwrite=true",
+        {"attributes": attrs},
+    )
+    if put.get("statusCode", 200) >= 400:
+        print(f"  WARN dashboard update failed: {put}", flush=True)
+        return
+    print(f"  patched orderAgg on: {', '.join(patched_titles)}", flush=True)
+
+
 def verify_controls_api(kb, auth: str) -> bool:
     """Verify options-list controls API (same path/body the Kibana UI uses)."""
     print("=== Verify dashboard controls API ===", flush=True)
@@ -322,7 +393,7 @@ def verify_ingest_pipeline_dashboard(kb, auth: str) -> bool:
                         "h": {
                             "date_histogram": {"field": "@timestamp", "fixed_interval": "1h"},
                             "aggs": {
-                                "cnt_m": {"max": {"field": "elasticsearch.ingest_pipeline.processor.count"}},
+                                "cnt_m": {"max": {"field": PROCESSOR_COUNT_FIELD}},
                                 "cnt_r": {"derivative": {"buckets_path": "cnt_m"}},
                                 "time_m": {
                                     "max": {"field": "elasticsearch.ingest_pipeline.processor.time.total.ms"}
@@ -335,6 +406,65 @@ def verify_ingest_pipeline_dashboard(kb, auth: str) -> bool:
             },
         },
     )
+    resp = kibana_curl(
+        kb,
+        auth,
+        "POST",
+        "/internal/search/ese",
+        {
+            "params": {
+                "index": index,
+                "body": {
+                    "size": 0,
+                    "query": {
+                        "bool": {
+                            "filter": [
+                                {"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}},
+                                {"query_string": {"query": INGEST_PIPELINE_KQL}},
+                                {"exists": {"field": "elasticsearch.ingest_pipeline.processor.type_tag"}},
+                            ]
+                        }
+                    },
+                    "aggs": {
+                        "procs": {
+                            "multi_terms": {
+                                "terms": [
+                                    {"field": "elasticsearch.ingest_pipeline.processor.order_index"},
+                                    {"field": "elasticsearch.ingest_pipeline.processor.type_tag"},
+                                    {"field": "elasticsearch.node.name"},
+                                ],
+                                "size": 100,
+                            },
+                            "aggs": {
+                                "order_metric": {"max": {"field": PROCESSOR_COUNT_FIELD}},
+                                "sorter": {
+                                    "bucket_sort": {
+                                        "sort": [{"order_metric": {"order": "desc"}}],
+                                        "size": 10,
+                                    }
+                                },
+                            },
+                        }
+                    },
+                },
+            }
+        },
+    )
+    raw = resp.get("rawResponse", {})
+    buckets = raw.get("aggregations", {}).get("procs", {}).get("buckets", [])
+    if raw.get("_shards", {}).get("failed", 1) or resp.get("statusCode", 200) >= 400 or not buckets:
+        print(
+            f"  FAIL processor orderAgg (Lens breakdown sort): "
+            f"buckets={len(buckets)} err={resp.get('message', resp)[:200]}",
+            flush=True,
+        )
+        ok = False
+    else:
+        print(
+            f"  OK processor orderAgg (Lens breakdown sort): "
+            f"buckets={len(buckets)} top={buckets[0].get('key_as_string', buckets[0].get('key'))}",
+            flush=True,
+        )
     return ok
 
 
@@ -362,6 +492,8 @@ def main() -> int:
     print("=== Patch Fleet / Stack Monitoring data views (after package reinstall) ===", flush=True)
     for view_id in DATA_VIEWS:
         patch_data_view(kb, auth, view_id)
+
+    patch_ingest_pipeline_dashboard(kb, auth)
 
     ok = (
         verify_dashboard_search(kb, auth)
