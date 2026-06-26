@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 from pathlib import Path
 
@@ -51,14 +52,10 @@ INGEST_PIPELINE_KQL = (
 )
 PROCESSOR_EXISTS_FIELD = "elasticsearch.ingest_pipeline.processor.type_tag"
 PIPELINE_EXISTS_FIELD = "elasticsearch.ingest_pipeline.total.count"
-PROCESSOR_PANEL_KQL = (
-    "(service.type:elasticsearch or data_stream.dataset:\"elasticsearch.ingest_pipeline\") "
-    f"and {PROCESSOR_EXISTS_FIELD}:*"
-)
-PIPELINE_PANEL_KQL = (
-    "(service.type:elasticsearch or data_stream.dataset:\"elasticsearch.ingest_pipeline\") "
-    f"and {PIPELINE_EXISTS_FIELD}:*"
-)
+# KQL "field:*" is not translated by Elasticsearch query_string (Lens may fall back to it).
+# Scope panels with exists filters in state.filters; keep KQL to the base ingest filter only.
+PROCESSOR_PANEL_KQL = INGEST_PIPELINE_KQL
+PIPELINE_PANEL_KQL = INGEST_PIPELINE_KQL
 
 # Broad pattern causes multi_terms type conflicts between ingest_pipeline (long
 # order_index) and stack_monitoring indices; only ingest dashboards use this view.
@@ -297,52 +294,88 @@ def _is_legacy_unscoped_kql(kql: str) -> bool:
     return normalized == base
 
 
-def _panel_scope_kql(state: dict) -> str | None:
-    """Pick processor- vs pipeline-scoped KQL for this Lens panel."""
+def _panel_exists_field(state: dict) -> str | None:
+    """Pick exists filter field for processor vs pipeline doc types."""
     if _panel_uses_processor_fields(state):
-        return PROCESSOR_PANEL_KQL
+        return PROCESSOR_EXISTS_FIELD
     if _panel_uses_pipeline_total_fields(state):
-        return PIPELINE_PANEL_KQL
+        return PIPELINE_EXISTS_FIELD
     text = json.dumps(state.get("datasourceStates", {}))
     if "ingest_pipeline.processor" in text:
-        return PROCESSOR_PANEL_KQL
+        return PROCESSOR_EXISTS_FIELD
     if "ingest_pipeline.total" in text:
-        return PIPELINE_PANEL_KQL
+        return PIPELINE_EXISTS_FIELD
     if _is_legacy_unscoped_kql(state.get("query", {}).get("query", "")):
-        return PIPELINE_PANEL_KQL
+        return PIPELINE_EXISTS_FIELD
     return None
 
 
+def _exists_filter(field: str) -> dict:
+    return {
+        "$state": {"store": "appState"},
+        "meta": {
+            "alias": None,
+            "disabled": False,
+            "key": field,
+            "negate": False,
+            "type": "exists",
+            "value": "exists",
+        },
+        "query": {"exists": {"field": field}},
+    }
+
+
+def _has_exists_filter(state: dict, field: str) -> bool:
+    for f in state.get("filters") or []:
+        if (
+            f.get("meta", {}).get("type") == "exists"
+            and f.get("meta", {}).get("key") == field
+        ):
+            return True
+    return False
+
+
 def _patch_lens_panel_queries(state: dict) -> bool:
-    """Scope queries to processor vs pipeline doc types (mutually exclusive in this index)."""
-    target = _panel_scope_kql(state)
-    if not target:
+    """Scope panels to processor vs pipeline docs via exists filters + base KQL."""
+    exists_field = _panel_exists_field(state)
+    if not exists_field:
         return False
+    changed = False
     query = state.setdefault("query", {"language": "kuery", "query": ""})
-    if query.get("query") == target:
-        return False
-    query["language"] = "kuery"
-    query["query"] = target
-    return True
+    target_kql = INGEST_PIPELINE_KQL
+    current = " ".join((query.get("query") or "").split())
+    if current != target_kql:
+        query["language"] = "kuery"
+        query["query"] = target_kql
+        changed = True
+    filters = state.setdefault("filters", [])
+    if not isinstance(filters, list):
+        filters = []
+        state["filters"] = filters
+        changed = True
+    # Drop stale exists filters and KQL-style scope suffixes from prior patches.
+    cleaned = [
+        f
+        for f in filters
+        if not (
+            f.get("meta", {}).get("type") == "exists"
+            and f.get("meta", {}).get("key")
+            in {PROCESSOR_EXISTS_FIELD, PIPELINE_EXISTS_FIELD}
+        )
+    ]
+    if len(cleaned) != len(filters):
+        filters = cleaned
+        state["filters"] = filters
+        changed = True
+    if not _has_exists_filter(state, exists_field):
+        filters.append(_exists_filter(exists_field))
+        changed = True
+    return changed
 
 
 def _normalize_lens_columns(state: dict) -> bool:
     """Fix Lens state shapes that crash the dashboard UI (e.g. .map on undefined)."""
     changed = False
-    filters = state.get("filters")
-    if isinstance(filters, list):
-        cleaned = [
-            f
-            for f in filters
-            if not (
-                f.get("meta", {}).get("type") == "exists"
-                and f.get("meta", {}).get("key")
-                in {PROCESSOR_EXISTS_FIELD, PIPELINE_EXISTS_FIELD}
-            )
-        ]
-        if len(cleaned) != len(filters):
-            state["filters"] = cleaned
-            changed = True
     for col in _iter_lens_columns(state):
         if col.get("operationType") != "terms":
             continue
@@ -749,10 +782,12 @@ def main() -> int:
         return 1
 
     kb = connect(kb_ip)
-    for name, version in PACKAGES:
-        reinstall_package_assets(kb, auth, name, version)
-
-    print("=== Patch Fleet / Stack Monitoring data views (after package reinstall) ===", flush=True)
+    if os.environ.get("SKIP_FLEET_REINSTALL", "").lower() not in ("1", "true", "yes"):
+        for name, version in PACKAGES:
+            reinstall_package_assets(kb, auth, name, version)
+        print("=== Patch Fleet / Stack Monitoring data views (after package reinstall) ===", flush=True)
+    else:
+        print("=== Skip Fleet reinstall (SKIP_FLEET_REINSTALL set) ===", flush=True)
     for view_id in DATA_VIEWS:
         patch_data_view(kb, auth, view_id)
 
