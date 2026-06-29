@@ -38,11 +38,18 @@ RUNTIME_TIMESTAMP = {
     }
 }
 
+STACK_MONITORING_INDEX = (
+    ".ds-.monitoring-es-*,.monitoring-es*,.ds-metrics-elasticsearch.stack_monitoring.*"
+)
+STACK_MONITORING_DATA_VIEW_LEGACY = "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9"
+STACK_MONITORING_DATA_VIEW = STACK_MONITORING_INDEX
+
 DATA_VIEWS = (
     "metrics-*",
     "logs-*",
     "metrics-elasticsearch.ingest_pipeline-*",
-    "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9",
+    STACK_MONITORING_DATA_VIEW,
+    STACK_MONITORING_DATA_VIEW_LEGACY,
 )
 
 # Elasticsearch integration reinstall resets managed SM data views; patch after install.
@@ -69,7 +76,6 @@ INGEST_PIPELINE_DASHBOARD_FIXED = "elasticsearch-ingest-pipeline-detail-fixed"
 INGEST_PIPELINE_DASHBOARD_FIXED_TITLE = (
     "[Elasticsearch] Ingest Pipeline Detail (Fixed)"
 )
-STACK_MONITORING_DATA_VIEW = "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9"
 CLUSTER_INGEST_DASHBOARDS = frozenset(
     {
         "elasticsearch-ea888f80-61e4-11ee-b5a1-0d1803efe5cf",
@@ -146,10 +152,11 @@ def _runtime_map_for_view(view_id: str, runtime_map: dict) -> dict:
 
 
 def patch_data_view(kb, auth: str, view_id: str) -> None:
-    resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{view_id}")
+    view_path = _data_view_path(view_id)
+    resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{view_path}")
     dv = resp.get("data_view")
     if not dv:
-        obj = kibana_curl(kb, auth, "GET", f"/api/saved_objects/index-pattern/{view_id}")
+        obj = kibana_curl(kb, auth, "GET", f"/api/saved_objects/index-pattern/{view_path}")
         if obj.get("statusCode") == 404:
             print(f"  skip missing data view {view_id}", flush=True)
             return
@@ -168,7 +175,7 @@ def patch_data_view(kb, auth: str, view_id: str) -> None:
             kb,
             auth,
             "PUT",
-            f"/api/saved_objects/index-pattern/{view_id}?overwrite=true",
+            f"/api/saved_objects/index-pattern/{view_path}?overwrite=true",
             {"attributes": attrs},
         )
         if put.get("statusCode", 200) >= 400:
@@ -194,7 +201,7 @@ def patch_data_view(kb, auth: str, view_id: str) -> None:
             "allowNoIndex": True,
         }
     }
-    put = kibana_curl(kb, auth, "POST", f"/api/data_views/data_view/{view_id}", body)
+    put = kibana_curl(kb, auth, "POST", f"/api/data_views/data_view/{view_path}", body)
     if put.get("statusCode", 200) >= 400:
         print(f"  WARN data_views update {view_id}: {put}", flush=True)
         return
@@ -336,6 +343,131 @@ def ensure_ingest_data_view_id_matches_title(kb, auth: str) -> bool:
     return True
 
 
+def ensure_stack_monitoring_data_view_id_matches_title(kb, auth: str) -> bool:
+    """Align stack-monitoring data view id with index title so controls API works.
+
+    Cluster Ingest controls resolve refs to the legacy UUID and call
+    /internal/controls/optionsList/{dataViewId} → 404 index_not_found when id≠title.
+    """
+    old_id = STACK_MONITORING_DATA_VIEW_LEGACY
+    new_id = STACK_MONITORING_DATA_VIEW
+    print("=== Align stack monitoring data view id with index pattern ===", flush=True)
+
+    new_resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{_data_view_path(new_id)}")
+    if new_resp.get("data_view"):
+        print(f"  OK data view {new_id[:60]}... already exists", flush=True)
+    else:
+        legacy = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{old_id}").get(
+            "data_view", {}
+        )
+        if not legacy:
+            print(f"  FAIL missing legacy data view {old_id}", flush=True)
+            return False
+        runtime_map = _runtime_map_for_view(old_id, dict(legacy.get("runtimeFieldMap") or {}))
+        attrs = {
+            "title": STACK_MONITORING_INDEX,
+            "timeFieldName": legacy.get("timeFieldName", "@timestamp"),
+            "runtimeFieldMap": json.dumps(runtime_map),
+            "allowNoIndex": True,
+        }
+        post = kibana_curl(
+            kb,
+            auth,
+            "POST",
+            f"/api/saved_objects/index-pattern/{_data_view_path(new_id)}",
+            {"attributes": attrs},
+        )
+        if post.get("statusCode", 200) >= 400:
+            print(f"  FAIL create stack monitoring data view: {post.get('message', post)[:200]}", flush=True)
+            return False
+        print(f"  OK created data view id={STACK_MONITORING_INDEX[:60]}...", flush=True)
+
+    qs = (
+        f"pattern={quote(STACK_MONITORING_INDEX, safe='')}"
+        "&meta_fields=_source&allow_no_index=true&apiVersion=1"
+    )
+    fields_resp = kibana_curl(kb, auth, "GET", f"/internal/data_views/fields?{qs}")
+    fields = fields_resp.get("fields") or []
+    field_count = len(fields) if isinstance(fields, list) else len(fields or {})
+    if field_count == 0:
+        print(f"  FAIL fields API pattern={STACK_MONITORING_INDEX[:60]}...: 0 fields", flush=True)
+        return False
+    print(f"  OK fields API: {field_count} fields", flush=True)
+
+    ctrl_body = {
+        "size": 50,
+        "fieldName": "elasticsearch.cluster.name",
+        "allowExpensiveQueries": True,
+        "filters": [{"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}}],
+        "selectedOptions": [],
+        "searchString": "",
+    }
+    ctrl_resp = kibana_curl(
+        kb,
+        auth,
+        "POST",
+        f"/internal/controls/optionsList/{_data_view_path(new_id)}",
+        ctrl_body,
+    )
+    suggestions = ctrl_resp.get("suggestions") or []
+    if ctrl_resp.get("statusCode", 200) >= 400 or not suggestions:
+        print(
+            f"  FAIL optionsList/{new_id[:40]}...: "
+            f"{ctrl_resp.get('message', ctrl_resp)[:200]}",
+            flush=True,
+        )
+        return False
+    print(f"  OK optionsList id-as-pattern: {len(suggestions)} cluster options", flush=True)
+
+    updated = 0
+    for item in list_elasticsearch_dashboards(kb, auth):
+        did = item["id"]
+        dash = kibana_curl(kb, auth, "GET", f"/api/saved_objects/dashboard/{did}")
+        if dash.get("statusCode", 200) >= 400:
+            continue
+        attrs = dash.get("attributes", {})
+        refs = list(dash.get("references", []))
+        payload = {"attributes": dict(attrs), "references": refs}
+        if not _replace_data_view_id_in_value(payload, old_id, new_id):
+            continue
+        payload["attributes"]["version"] = int(attrs.get("version", 1) or 1) + 1
+        put = kibana_curl(
+            kb,
+            auth,
+            "PUT",
+            f"/api/saved_objects/dashboard/{did}?overwrite=true",
+            payload,
+        )
+        if put.get("statusCode", 200) >= 400:
+            print(
+                f"  FAIL repoint {item.get('attributes', {}).get('title', did)}: "
+                f"{put.get('message', put)[:120]}",
+                flush=True,
+            )
+            return False
+        updated += 1
+        print(f"  OK repointed {item.get('attributes', {}).get('title', did)}", flush=True)
+
+    fixed = kibana_curl(kb, auth, "GET", f"/api/saved_objects/dashboard/{INGEST_PIPELINE_DASHBOARD_FIXED}")
+    if fixed.get("id"):
+        attrs = fixed.get("attributes", {})
+        refs = list(fixed.get("references", []))
+        payload = {"attributes": dict(attrs), "references": refs}
+        if _replace_data_view_id_in_value(payload, old_id, new_id):
+            payload["attributes"]["version"] = int(attrs.get("version", 1) or 1) + 1
+            kibana_curl(
+                kb,
+                auth,
+                "PUT",
+                f"/api/saved_objects/dashboard/{INGEST_PIPELINE_DASHBOARD_FIXED}?overwrite=true",
+                payload,
+            )
+
+    patch_data_view(kb, auth, new_id)
+    print(f"  dashboards_updated={updated}", flush=True)
+    return True
+
+
 def reinstall_package_assets(kb, auth: str, name: str, version: str) -> None:
     print(f"=== Reinstall {name}@{version} Kibana assets ===", flush=True)
     resp = kibana_curl(
@@ -357,7 +489,7 @@ def verify_dashboard_search(kb, auth: str) -> bool:
     checks = [
         ("metrics-*", "metrics-*"),
         (INGEST_PIPELINE_DATA_VIEW, INGEST_PIPELINE_INDEX),
-        ("es-stack-monitoring", ".ds-.monitoring-es-*,.monitoring-es*,.ds-metrics-elasticsearch.stack_monitoring.*"),
+        ("es-stack-monitoring", STACK_MONITORING_INDEX),
     ]
     for label, index in checks:
         body = {
@@ -866,8 +998,9 @@ def verify_elasticsearch_dashboards(kb, auth: str) -> bool:
     print("=== Verify [Elasticsearch] dashboards ===", flush=True)
     ok = True
     dv_index: dict[str, str] = {}
-    for vid in (INGEST_PIPELINE_DATA_VIEW, "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9"):
-        dv = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{vid}").get("data_view", {})
+    for vid in (INGEST_PIPELINE_DATA_VIEW, STACK_MONITORING_DATA_VIEW, STACK_MONITORING_DATA_VIEW_LEGACY):
+        path = _data_view_path(vid)
+        dv = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{path}").get("data_view", {})
         if dv:
             dv_index[vid] = dv.get("title", vid)
 
@@ -929,19 +1062,32 @@ def verify_elasticsearch_dashboards(kb, auth: str) -> bool:
             for r in dash.get("references", [])
             if r.get("type") == "index-pattern" and "controlGroup" in r.get("name", "")
         ]
-        ctrl_index = ""
+        ctrl_dv_id = ""
         for dv_id in ctrl_dv_ids:
-            if dv_id in dv_index:
-                ctrl_index = dv_index[dv_id]
+            if dv_id in dv_index or dv_id in {
+                INGEST_PIPELINE_DATA_VIEW,
+                STACK_MONITORING_DATA_VIEW,
+            }:
+                ctrl_dv_id = dv_id
                 break
-        if not ctrl_index:
+        if not ctrl_dv_id:
             panel_dv_ids = {
                 r["id"] for r in dash.get("references", []) if r.get("type") == "index-pattern"
             }
             if INGEST_PIPELINE_DATA_VIEW in panel_dv_ids:
-                ctrl_index = dv_index.get(INGEST_PIPELINE_DATA_VIEW, "")
-            elif "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9" in panel_dv_ids:
-                ctrl_index = dv_index.get("befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9", "")
+                ctrl_dv_id = INGEST_PIPELINE_DATA_VIEW
+            elif STACK_MONITORING_DATA_VIEW in panel_dv_ids:
+                ctrl_dv_id = STACK_MONITORING_DATA_VIEW
+            elif STACK_MONITORING_DATA_VIEW_LEGACY in panel_dv_ids:
+                ctrl_dv_id = STACK_MONITORING_DATA_VIEW_LEGACY
+
+        if ctrl_dv_id == STACK_MONITORING_DATA_VIEW_LEGACY:
+            print(
+                f"  FAIL {title}: controls still reference legacy data view {STACK_MONITORING_DATA_VIEW_LEGACY}",
+                flush=True,
+            )
+            ok = False
+            continue
 
         for field in control_fields:
             body = {
@@ -952,11 +1098,22 @@ def verify_elasticsearch_dashboards(kb, auth: str) -> bool:
                 "selectedOptions": [],
                 "searchString": "",
             }
-            resp = kibana_curl(kb, auth, "POST", f"/internal/controls/optionsList/{ctrl_index}", body)
+            if ctrl_dv_id == INGEST_PIPELINE_DATA_VIEW:
+                body["filters"].insert(
+                    0, {"query_string": {"query": INGEST_PIPELINE_KQL}}
+                )
+            options_path = _data_view_path(ctrl_dv_id) if ctrl_dv_id else ""
+            resp = kibana_curl(
+                kb,
+                auth,
+                "POST",
+                f"/internal/controls/optionsList/{options_path}",
+                body,
+            )
             suggestions = resp.get("suggestions") or []
             if resp.get("statusCode", 200) >= 400 or not suggestions:
                 print(
-                    f"  FAIL {title}: control {field} on {ctrl_index}: "
+                    f"  FAIL {title}: control {field} on id={ctrl_dv_id[:50]}: "
                     f"{resp.get('message', resp)[:120]}",
                     flush=True,
                 )
@@ -1113,6 +1270,7 @@ def main() -> int:
         patch_data_view(kb, auth, view_id)
 
     ensure_ingest_data_view_id_matches_title(kb, auth)
+    ensure_stack_monitoring_data_view_id_matches_title(kb, auth)
     patch_elasticsearch_dashboards(kb, auth)
     clone_ingest_pipeline_dashboard(kb, auth)
 

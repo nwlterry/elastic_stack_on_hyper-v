@@ -12,6 +12,7 @@ from fix_dashboard_search import (
     INGEST_PIPELINE_INDEX,
     clone_ingest_pipeline_dashboard,
     ensure_ingest_data_view_id_matches_title,
+    ensure_stack_monitoring_data_view_id_matches_title,
     patch_data_view,
     patch_elasticsearch_dashboards,
     verify_dashboard_search,
@@ -32,6 +33,7 @@ def main() -> int:
     for view_id in DATA_VIEWS:
         patch_data_view(kb, auth, view_id)
     ok = ensure_ingest_data_view_id_matches_title(kb, auth)
+    ok = ensure_stack_monitoring_data_view_id_matches_title(kb, auth) and ok
     ok = patch_elasticsearch_dashboards(kb, auth) and ok
     ok = clone_ingest_pipeline_dashboard(kb, auth) and ok
     ok = (
