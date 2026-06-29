@@ -137,13 +137,16 @@ def _is_ingest_pipeline_view(view_id: str) -> bool:
     return view_id in {INGEST_PIPELINE_DATA_VIEW, INGEST_PIPELINE_DATA_VIEW_LEGACY}
 
 
+def _is_stack_monitoring_view(view_id: str) -> bool:
+    return view_id in {STACK_MONITORING_DATA_VIEW, STACK_MONITORING_DATA_VIEW_LEGACY}
+
+
 def _runtime_map_for_view(view_id: str, runtime_map: dict) -> dict:
     """Return runtime fields appropriate for each data view."""
     runtime_map = dict(runtime_map)
-    if _is_ingest_pipeline_view(view_id):
-        # Ingest pipeline Fleet metrics already have native @timestamp. A runtime
-        # @timestamp that reads doc['@timestamp'] causes a cyclic dependency when
-        # controls/Lens apply dashboard time filters (search_phase_execution_exception).
+    if _is_ingest_pipeline_view(view_id) or view_id == STACK_MONITORING_DATA_VIEW:
+        # Fleet metrics already have native @timestamp. Runtime @timestamp makes the
+        # browser controls API send runtimeFieldMap → search_phase_execution_exception.
         runtime_map.pop("@timestamp", None)
         return runtime_map
     if "@timestamp" not in runtime_map:
@@ -226,7 +229,10 @@ def _replace_data_view_id_in_value(obj, old_id: str, new_id: str) -> bool:
             obj["id"] = new_id
             changed = True
         for key, val in list(obj.items()):
-            if key in ("panelsJSON", "controlGroupInput") and isinstance(val, str) and old_id in val:
+            if isinstance(val, str) and val == old_id:
+                obj[key] = new_id
+                changed = True
+            elif key in ("panelsJSON", "controlGroupInput") and isinstance(val, str) and old_id in val:
                 try:
                     parsed = json.loads(val)
                 except json.JSONDecodeError:
@@ -906,6 +912,39 @@ def clone_ingest_pipeline_dashboard(kb, auth: str) -> bool:
     return True
 
 
+def _browser_control_body(field: str, runtime_map: dict | None = None) -> dict:
+    """Payload shape Kibana 8.18 dashboard controls send from the browser."""
+    return {
+        "sort": {"by": "_count", "direction": "desc"},
+        "searchString": "",
+        "searchTechnique": "prefix",
+        "allowExpensiveQueries": True,
+        "fieldName": field,
+        "fieldSpec": {
+            "name": field,
+            "type": "string",
+            "esTypes": ["keyword"],
+            "scripted": False,
+            "searchable": True,
+            "aggregatable": True,
+        },
+        "filters": [
+            {
+                "bool": {
+                    "must": [],
+                    "filter": [{"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}}],
+                    "should": [],
+                    "must_not": [],
+                }
+            }
+        ],
+        "ignoreValidations": False,
+        "runtimeFieldMap": runtime_map or {},
+        "selectedOptions": [],
+        "size": 10,
+    }
+
+
 def patch_elasticsearch_dashboards(kb, auth: str) -> bool:
     """Patch all Fleet [Elasticsearch] dashboards (Lens state + ingest pipeline fixes)."""
     print("=== Patch [Elasticsearch] dashboard Lens panels ===", flush=True)
@@ -914,6 +953,10 @@ def patch_elasticsearch_dashboards(kb, auth: str) -> bool:
     if not dashboards:
         print("  WARN no [Elasticsearch] dashboards found", flush=True)
         return False
+    repoint_pairs = (
+        (INGEST_PIPELINE_DATA_VIEW_LEGACY, INGEST_PIPELINE_DATA_VIEW),
+        (STACK_MONITORING_DATA_VIEW_LEGACY, STACK_MONITORING_DATA_VIEW),
+    )
     for item in dashboards:
         did = item["id"]
         title = item.get("attributes", {}).get("title", did)
@@ -923,17 +966,23 @@ def patch_elasticsearch_dashboards(kb, auth: str) -> bool:
             ok = False
             continue
         attrs = resp.get("attributes", {})
+        refs = list(resp.get("references", []))
         new_attrs, patched_titles, corrupt_fixed, legacy_migrated = _patch_dashboard_lens_panels(attrs)
-        if not patched_titles:
-            print(f"  skip {title}: no lens panels", flush=True)
+        repointed = False
+        payload = {"attributes": dict(new_attrs), "references": refs}
+        for old_id, new_id in repoint_pairs:
+            if _replace_data_view_id_in_value(payload, old_id, new_id):
+                repointed = True
+        if not patched_titles and not repointed:
+            print(f"  skip {title}: no changes", flush=True)
             continue
-        new_attrs["version"] = int(attrs.get("version", 1) or 1) + 1
+        payload["attributes"]["version"] = int(attrs.get("version", 1) or 1) + 1
         put = kibana_curl(
             kb,
             auth,
             "PUT",
             f"/api/saved_objects/dashboard/{did}?overwrite=true",
-            {"attributes": new_attrs},
+            payload,
         )
         if put.get("statusCode", 200) >= 400:
             print(f"  FAIL {title}: {put.get('message', put)[:200]}", flush=True)
@@ -941,7 +990,8 @@ def patch_elasticsearch_dashboards(kb, auth: str) -> bool:
             continue
         print(
             f"  OK {title}: panels={len(patched_titles)} "
-            f"corrupt_state_fixed={corrupt_fixed} legacy_metric_migrated={legacy_migrated}",
+            f"corrupt_state_fixed={corrupt_fixed} legacy_metric_migrated={legacy_migrated} "
+            f"repointed={repointed}",
             flush=True,
         )
     return ok
@@ -1089,16 +1139,39 @@ def verify_elasticsearch_dashboards(kb, auth: str) -> bool:
             ok = False
             continue
 
+        if STACK_MONITORING_DATA_VIEW_LEGACY in json.dumps(dash):
+            print(f"  FAIL {title}: legacy stack monitoring id still embedded in dashboard", flush=True)
+            ok = False
+
+        dv_meta = (
+            kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{_data_view_path(ctrl_dv_id)}").get(
+                "data_view", {}
+            )
+            if ctrl_dv_id
+            else {}
+        )
+        runtime_map = dict(dv_meta.get("runtimeFieldMap") or {})
+        if ctrl_dv_id == STACK_MONITORING_DATA_VIEW and runtime_map:
+            print(
+                f"  FAIL {title}: stack monitoring data view still has runtime fields {list(runtime_map)}",
+                flush=True,
+            )
+            ok = False
+
+        use_browser_body = ctrl_dv_id in {STACK_MONITORING_DATA_VIEW, INGEST_PIPELINE_DATA_VIEW}
         for field in control_fields:
-            body = {
-                "size": 50,
-                "fieldName": field,
-                "allowExpensiveQueries": True,
-                "filters": [{"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}}],
-                "selectedOptions": [],
-                "searchString": "",
-            }
-            if ctrl_dv_id == INGEST_PIPELINE_DATA_VIEW:
+            if use_browser_body:
+                body = _browser_control_body(field, runtime_map)
+            else:
+                body = {
+                    "size": 50,
+                    "fieldName": field,
+                    "allowExpensiveQueries": True,
+                    "filters": [{"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}}],
+                    "selectedOptions": [],
+                    "searchString": "",
+                }
+            if ctrl_dv_id == INGEST_PIPELINE_DATA_VIEW and not use_browser_body:
                 body["filters"].insert(
                     0, {"query_string": {"query": INGEST_PIPELINE_KQL}}
                 )
