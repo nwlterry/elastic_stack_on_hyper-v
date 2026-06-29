@@ -1,0 +1,459 @@
+{
+  "scanned_at": "2026-06-29T06:28:00.975139+00:00",
+  "cluster": {
+    "name": "ism-elk-cluster",
+    "status": "green",
+    "nodes": 3
+  },
+  "elasticsearch": {
+    "ingest_pipelines": [
+      ".fleet_final_pipeline-1",
+      "apm@pipeline",
+      "behavioral_analytics-events-final_pipeline",
+      "ent-search-generic-ingestion",
+      "logs-apm.app@default-pipeline",
+      "logs-apm.error@default-pipeline",
+      "logs-default-pipeline",
+      "logs-elastic_agent-2.3.0",
+      "logs-elastic_agent.apm_server-2.3.0",
+      "logs-elastic_agent.auditbeat-2.3.0",
+      "logs-elastic_agent.cloud_defend-2.3.0",
+      "logs-elastic_agent.cloudbeat-2.3.0",
+      "logs-elastic_agent.endpoint_security-2.3.0",
+      "logs-elastic_agent.filebeat-2.3.0",
+      "logs-elastic_agent.filebeat_input-2.3.0",
+      "logs-elastic_agent.fleet_server-2.3.0",
+      "logs-elastic_agent.heartbeat-2.3.0",
+      "logs-elastic_agent.metricbeat-2.3.0",
+      "logs-elastic_agent.osquerybeat-2.3.0",
+      "logs-elastic_agent.packetbeat-2.3.0",
+      "logs-elastic_agent.pf_elastic_collector-2.3.0",
+      "logs-elastic_agent.pf_elastic_symbolizer-2.3.0",
+      "logs-elastic_agent.pf_host_agent-2.3.0",
+      "logs-elastic_agent.status_change-2.3.0",
+      "logs-elasticsearch.audit-1.12.0",
+      "logs-elasticsearch.audit-1.12.0-pipeline-json",
+      "logs-elasticsearch.deprecation-1.12.0",
+      "logs-elasticsearch.deprecation-1.12.0-pipeline-json",
+      "logs-elasticsearch.gc-1.12.0",
+      "logs-elasticsearch.server-1.12.0",
+      "logs-elasticsearch.server-1.12.0-pipeline-json",
+      "logs-elasticsearch.slowlog-1.12.0",
+      "logs-elasticsearch.slowlog-1.12.0-pipeline-json",
+      "logs-fleet_server.output_health-1.6.0",
+      "logs-kibana.audit-2.3.1",
+      "logs-kibana.audit-2.3.1-pipeline-json",
+      "logs-kibana.log-2.3.1",
+      "logs-kibana.log-2.3.1-pipeline-json",
+      "logs-system.application-1.60.0",
+      "logs-system.auth-1.60.0",
+      "logs-system.security-1.60.0",
+      "logs-system.security-1.60.0-standard",
+      "logs-system.syslog-1.60.0",
+      "logs-system.system-1.60.0",
+      "logs@default-pipeline",
+      "logs@json-message",
+      "logs@json-pipeline",
+      "metrics-apm.app@default-pipeline",
+      "metrics-apm.internal@default-pipeline",
+      "metrics-apm.service_destination@default-pipeline",
+      "metrics-apm.service_summary@default-pipeline",
+      "metrics-apm.service_transaction@default-pipeline",
+      "metrics-apm.transaction@default-pipeline",
+      "metrics-apm@pipeline",
+      "metrics-elastic_agent.apm_server-2.3.0",
+      "metrics-elastic_agent.auditbeat-2.3.0",
+      "metrics-elastic_agent.cloudbeat-2.3.0",
+      "metrics-elastic_agent.elastic_agent-2.3.0",
+      "metrics-elastic_agent.endpoint_security-2.3.0",
+      "metrics-elastic_agent.filebeat-2.3.0",
+      "metrics-elastic_agent.filebeat_input-2.3.0",
+      "metrics-elastic_agent.fleet_server-2.3.0",
+      "metrics-elastic_agent.heartbeat-2.3.0",
+      "metrics-elastic_agent.metricbeat-2.3.0",
+      "metrics-elastic_agent.osquerybeat-2.3.0",
+      "metrics-elastic_agent.packetbeat-2.3.0",
+      "metrics-elasticsearch.ingest_pipeline-1.12.0",
+      "metrics-elasticsearch.stack_monitoring.ccr-1.12.0",
+      "metrics-elasticsearch.stack_monitoring.cluster_stats-1.12.0",
+      "metrics-elasticsearch.stack_monitoring.enrich-1.12.0",
+      "metrics-elasticsearch.stack_monitoring.index-1.12.0",
+      "metrics-elasticsearch.stack_monitoring.index_recovery-1.12.0",
+      "metrics-elasticsearch.stack_monitoring.index_summary-1.12.0",
+      "metrics-elasticsearch.stack_monitoring.ml_job-1.12.0",
+      "metrics-elasticsearch.stack_monitoring.node-1.12.0",
+      "metrics-elasticsearch.stack_monitoring.node_stats-1.12.0",
+      "metrics-elasticsearch.stack_monitoring.pending_tasks-1.12.0",
+      "metrics-elasticsearch.stack_monitoring.shard-1.12.0",
+      "metrics-fleet_server.agent_status-1.6.0",
+      "metrics-fleet_server.agent_versions-1.6.0"
+    ],
+    "index_templates": [
+      "logs-apm.error@template",
+      "metrics-elasticsearch.stack_monitoring.node_stats",
+      "metrics-apm.service_destination.1m@template",
+      "metrics-elastic_agent.apm_server",
+      "ilm-history-7",
+      "metrics-elasticsearch.stack_monitoring.pending_tasks",
+      ".fleet-fileds-tohost-meta",
+      "logs-kibana.log",
+      ".fleet-fileds-fromhost-data",
+      "traces-otel@template",
+      "metrics-transaction.10m.otel@template",
+      ".alerts-observability.metrics.alerts-default-index-template",
+      "metrics-kibana.stack_monitoring.status",
+      ".kibana-siem-rule-migrations-integrations",
+      "logs-elastic_agent.osquerybeat",
+      ".slo-observability.summary",
+      "logs-otel@template",
+      "metrics-apm.transaction.60m@template",
+      "logs-elastic_agent.auditbeat",
+      "metrics-system.uptime",
+      ".alerts-ml.anomaly-detection.alerts-default-index-template",
+      "logs-elastic_agent.cloudbeat",
+      "metrics-service_summary.60m.otel@template",
+      "metrics-apm.service_summary.10m@template",
+      "logs-elastic_agent.apm_server",
+      "metrics-service_destination.1m@template",
+      "logs-system.auth",
+      ".kibana_entities-definitions-template",
+      "logs-elastic_agent.endpoint_security",
+      "metrics-kibana.stack_monitoring.node_actions",
+      ".monitoring-logstash-mb",
+      "logs-elasticsearch.server",
+      "metrics-system.network",
+      "metrics",
+      ".ml-notifications-000002",
+      "logs-elastic_agent.status_change",
+      ".alerts-security.alerts-default-index-template",
+      "metrics-elasticsearch.stack_monitoring.index",
+      "behavioral_analytics-events-default",
+      "synthetics-http",
+      "metrics-elastic_agent.osquerybeat",
+      "metrics-elasticsearch.ingest_pipeline",
+      "elastic-connectors",
+      ".kibana-siem-rule-migrations-resources",
+      "logs-elastic_agent.metricbeat",
+      "logs-elasticsearch.slowlog",
+      ".alerts-default.alerts-default-index-template",
+      "synthetics-tcp",
+      "metrics-kibana.stack_monitoring.cluster_actions",
+      "elastic-connectors-sync-jobs"
+    ],
+    "metrics_data_streams": [
+      "metrics-elastic_agent.elastic_agent-default",
+      "metrics-elastic_agent.filebeat-default",
+      "metrics-elastic_agent.filebeat_input-default",
+      "metrics-elastic_agent.fleet_server-default",
+      "metrics-elastic_agent.metricbeat-default",
+      "metrics-elasticsearch.ingest_pipeline-default",
+      "metrics-elasticsearch.stack_monitoring.cluster_stats-default",
+      "metrics-elasticsearch.stack_monitoring.enrich-default",
+      "metrics-elasticsearch.stack_monitoring.index-default",
+      "metrics-elasticsearch.stack_monitoring.index_recovery-default",
+      "metrics-elasticsearch.stack_monitoring.index_summary-default",
+      "metrics-elasticsearch.stack_monitoring.ml_job-default",
+      "metrics-elasticsearch.stack_monitoring.node-default",
+      "metrics-elasticsearch.stack_monitoring.node_stats-default",
+      "metrics-elasticsearch.stack_monitoring.pending_tasks-default",
+      "metrics-elasticsearch.stack_monitoring.shard-default",
+      "metrics-fleet_server.agent_status-default",
+      "metrics-fleet_server.agent_versions-default",
+      "metrics-kibana.stack_monitoring.cluster_actions-default",
+      "metrics-kibana.stack_monitoring.cluster_rules-default",
+      "metrics-kibana.stack_monitoring.node_actions-default",
+      "metrics-kibana.stack_monitoring.node_rules-default",
+      "metrics-kibana.stack_monitoring.stats-default",
+      "metrics-kibana.stack_monitoring.status-default",
+      "metrics-system.core-default",
+      "metrics-system.cpu-default",
+      "metrics-system.diskio-default",
+      "metrics-system.filesystem-default",
+      "metrics-system.fsstat-default",
+      "metrics-system.load-default",
+      "metrics-system.memory-default",
+      "metrics-system.network-default",
+      "metrics-system.process-default",
+      "metrics-system.process.summary-default",
+      "metrics-system.socket_summary-default",
+      "metrics-system.uptime-default"
+    ]
+  },
+  "kibana": {},
+  "fleet": {
+    "agents": [
+      {
+        "id": "009f4d34-7546-4f88-b834-da85f09465b8",
+        "status": "online",
+        "policy_id": "3b226858-3140-4a6b-b044-05dc7819a338"
+      },
+      {
+        "id": "7e5184ae-8b16-4e95-b6d3-e22965268317",
+        "status": "online",
+        "policy_id": "05938e82-95d5-43bb-ad71-c15003ffd317"
+      },
+      {
+        "id": "e4073cc1-f6b7-49df-b797-2d45bf304441",
+        "status": "online",
+        "policy_id": "f4826033-d0e6-427a-a02e-d6e9369e5976"
+      },
+      {
+        "id": "c3cf20a8-ea78-489d-84c2-eca6691945ac",
+        "status": "online",
+        "policy_id": "38bcd067-0f86-4201-9af0-90e5980afd1a"
+      },
+      {
+        "id": "58910916-8e26-4390-bf3e-e1ba6cbf37fb",
+        "status": "online",
+        "policy_id": "9be39452-a297-4b8b-9fae-b12ab3cb9315"
+      }
+    ],
+    "package_policies": [
+      {
+        "name": "ismelkkbnnode01-kibana",
+        "package": "kibana",
+        "streams": 8
+      },
+      {
+        "name": "kibana-system",
+        "package": "system",
+        "streams": 14
+      },
+      {
+        "name": "ismelkesnode03-elasticsearch",
+        "package": "elasticsearch",
+        "streams": 11
+      },
+      {
+        "name": "ismelkesnode03-system",
+        "package": "system",
+        "streams": 14
+      },
+      {
+        "name": "ismelkesnode02-elasticsearch",
+        "package": "elasticsearch",
+        "streams": 11
+      },
+      {
+        "name": "ismelkesnode02-system",
+        "package": "system",
+        "streams": 14
+      },
+      {
+        "name": "ismelkesnode01-elasticsearch",
+        "package": "elasticsearch",
+        "streams": 11
+      },
+      {
+        "name": "ismelkesnode01-system",
+        "package": "system",
+        "streams": 14
+      },
+      {
+        "name": "fleet_server-1",
+        "package": "fleet_server",
+        "streams": 0
+      }
+    ]
+  },
+  "dashboards": [
+    {
+      "id": "elasticsearch-ea5b81a0-7fbf-11ed-8509-ddabeb9daeaf",
+      "title": "[Elasticsearch] Ingest Pipeline Detail",
+      "managed": true,
+      "panels": 20,
+      "lens_panels": 17,
+      "lens_state_types": {
+        "dict": 17
+      },
+      "bad_non_ingest_kql": 0,
+      "data_views": [
+        "metrics-elasticsearch.ingest_pipeline-*"
+      ]
+    },
+    {
+      "id": "elasticsearch-ingest-pipeline-detail-fixed",
+      "title": "[Elasticsearch] Ingest Pipeline Detail (Fixed)",
+      "managed": false,
+      "panels": 20,
+      "lens_panels": 17,
+      "lens_state_types": {
+        "dict": 17
+      },
+      "bad_non_ingest_kql": 0,
+      "data_views": [
+        "metrics-elasticsearch.ingest_pipeline-*"
+      ]
+    },
+    {
+      "id": "elasticsearch-b1399af0-628c-11ee-9c63-732d7f759a7a",
+      "title": "[Elasticsearch] Cluster Ingest Per Day - Cluster & Node View (Technical Preview/Beta)",
+      "managed": true,
+      "panels": 6,
+      "lens_panels": 5,
+      "lens_state_types": {
+        "dict": 5
+      },
+      "bad_non_ingest_kql": 0,
+      "data_views": [
+        "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9"
+      ]
+    },
+    {
+      "id": "elasticsearch-ea888f80-61e4-11ee-b5a1-0d1803efe5cf",
+      "title": "[Elasticsearch] Cluster Ingest Per Day - Index & Shard View (Technical Preview/Beta)",
+      "managed": true,
+      "panels": 5,
+      "lens_panels": 4,
+      "lens_state_types": {
+        "dict": 4
+      },
+      "bad_non_ingest_kql": 0,
+      "data_views": [
+        "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9"
+      ]
+    },
+    {
+      "id": "elasticsearch-metrics-ingest-pipelines",
+      "title": "[Elasticsearch] Ingest Pipelines",
+      "managed": true,
+      "panels": 14,
+      "lens_panels": 12,
+      "lens_state_types": {
+        "dict": 12
+      },
+      "bad_non_ingest_kql": 0,
+      "data_views": [
+        "metrics-elasticsearch.ingest_pipeline-*"
+      ]
+    }
+  ],
+  "data_views": [
+    {
+      "id": "elasticsearch-sm-metrics",
+      "title": null,
+      "runtime_fields": []
+    },
+    {
+      "id": "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9",
+      "title": null,
+      "runtime_fields": []
+    },
+    {
+      "id": "metrics-*",
+      "title": null,
+      "runtime_fields": []
+    },
+    {
+      "id": "logs-*",
+      "title": null,
+      "runtime_fields": []
+    },
+    {
+      "id": "metrics-elasticsearch.ingest_pipeline-*",
+      "title": null,
+      "runtime_fields": []
+    }
+  ],
+  "alert_rules": [
+    {
+      "id": "d1b8e680-bcb9-42ff-aaf9-274aa7f4c667",
+      "name": "Cluster health",
+      "rule_type_id": "monitoring_alert_cluster_health",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "d3fa92b9-3a3d-4911-be03-643de8a956ab",
+      "name": "Memory Usage (JVM)",
+      "rule_type_id": "monitoring_alert_jvm_memory_usage",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "93602ea6-7eee-4105-a3c9-187ac0dc56e8",
+      "name": "CCR read exceptions",
+      "rule_type_id": "monitoring_ccr_read_exceptions",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "8b169be7-40a1-4cbf-8a99-eeeb9ed341a1",
+      "name": "Thread pool search rejections",
+      "rule_type_id": "monitoring_alert_thread_pool_search_rejections",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "64a93cb9-b4dd-4061-96a8-86578d5292bd",
+      "name": "Thread pool write rejections",
+      "rule_type_id": "monitoring_alert_thread_pool_write_rejections",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "d13d1cfa-0623-4df0-9f33-c61c08b18c6a",
+      "name": "Disk Usage",
+      "rule_type_id": "monitoring_alert_disk_usage",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "ae9627d3-a945-466c-8640-4b38474328ae",
+      "name": "CPU Usage",
+      "rule_type_id": "monitoring_alert_cpu_usage",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "244a26aa-8c69-4a16-b00f-b9dd47b0a56b",
+      "name": "Logstash version mismatch",
+      "rule_type_id": "monitoring_alert_logstash_version_mismatch",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "63852a8e-450e-4213-8509-b0da7a4da6a6",
+      "name": "Kibana version mismatch",
+      "rule_type_id": "monitoring_alert_kibana_version_mismatch",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "a6aada86-c7f4-4e8f-b5fd-c171982e44e5",
+      "name": "Elasticsearch version mismatch",
+      "rule_type_id": "monitoring_alert_elasticsearch_version_mismatch",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "043063fe-1567-424c-9764-782da1728d48",
+      "name": "License expiration",
+      "rule_type_id": "monitoring_alert_license_expiration",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "f9d55b40-7f22-45d2-8f86-73876d3ad5e8",
+      "name": "Missing monitoring data",
+      "rule_type_id": "monitoring_alert_missing_monitoring_data",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "032543d2-0770-4ec9-a3fc-d5e98082c78a",
+      "name": "Nodes changed",
+      "rule_type_id": "monitoring_alert_nodes_changed",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "635dc63a-36ce-4789-99fd-257e6f04e0cd",
+      "name": "Shard size",
+      "rule_type_id": "monitoring_shard_size",
+      "enabled": true,
+      "consumer": "monitoring"
+    }
+  ],
+  "issues": []
+}

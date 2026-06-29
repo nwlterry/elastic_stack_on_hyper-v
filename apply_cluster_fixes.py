@@ -10,9 +10,13 @@ import shlex
 import subprocess
 import sys
 
+import os
+
+from apply_dashboard_patch import main as apply_dashboard_patch
+from scan_cluster_config import main as scan_cluster_config
 from apply_node_integrations import main as apply_integrations, restart_agents_on_nodes
 from cluster_health_review import main as run_health_review
-from fix_dashboard_search import main as fix_dashboard_search
+from fix_dashboard_search import fix_monitoring_ui_creds
 from deploy_ordered_stack import (
     ES_NODES,
     ES_PRIMARY_IP,
@@ -98,7 +102,7 @@ def download_synthetics_package() -> None:
 def main() -> int:
     es = connect(NODES["es01"][0])
     elastic_pwd = get_elastic_password(es)
-    ensure_monitoring_user(es, run, elastic_pwd)
+    _user, monitoring_pwd = ensure_monitoring_user(es, run, elastic_pwd)
     es.close()
 
     download_synthetics_package()
@@ -122,15 +126,27 @@ def main() -> int:
     else:
         print("=== Integration streams already populated ===", flush=True)
 
-    print("=== Fix dashboard search (data views + monitoring UI creds) ===", flush=True)
-    fix_dashboard_search()
+    print("=== Fix dashboard search (monitoring UI creds + Lens patches) ===", flush=True)
+    kb = connect(NODES["kibana"][0])
+    fix_monitoring_ui_creds(kb, monitoring_pwd)
+    kb.close()
+    if not wait_kibana_stable(NODES["kibana"][0], elastic_pwd=elastic_pwd, max_attempts=30):
+        print("ERROR: Kibana not stable after monitoring UI config", flush=True)
+        return 1
+    os.environ.setdefault("SKIP_FLEET_REINSTALL", "1")
+    if apply_dashboard_patch() != 0:
+        print("ERROR: apply_dashboard_patch failed", flush=True)
+        return 1
 
     print("=== Restart elastic-agents (refresh Fleet/ES connections) ===", flush=True)
     restart_agents_on_nodes(elastic_pwd)
 
+    print("\n=== Post-fix cluster config scan ===", flush=True)
+    scan_issues = scan_cluster_config()
+
     print("\n=== Post-fix health review ===", flush=True)
     issues = run_health_review()
-    return 0 if issues == 0 else 1
+    return 0 if issues == 0 and scan_issues == 0 else 1
 
 
 if __name__ == "__main__":

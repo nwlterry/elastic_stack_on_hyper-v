@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 from pathlib import Path
+from urllib.parse import quote
 
 from deploy_ordered_stack import (
     NODES,
@@ -40,7 +41,7 @@ RUNTIME_TIMESTAMP = {
 DATA_VIEWS = (
     "metrics-*",
     "logs-*",
-    "elasticsearch-sm-metrics",
+    "metrics-elasticsearch.ingest_pipeline-*",
     "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9",
 )
 
@@ -60,8 +61,21 @@ PIPELINE_PANEL_KQL = INGEST_PIPELINE_KQL
 # Broad pattern causes multi_terms type conflicts between ingest_pipeline (long
 # order_index) and stack_monitoring indices; only ingest dashboards use this view.
 INGEST_PIPELINE_INDEX = "metrics-elasticsearch.ingest_pipeline-*"
-INGEST_PIPELINE_DATA_VIEW = "elasticsearch-sm-metrics"
+# Fleet package id; must not be used as /internal/data_views/fields pattern (0 fields).
+INGEST_PIPELINE_DATA_VIEW_LEGACY = "elasticsearch-sm-metrics"
+INGEST_PIPELINE_DATA_VIEW = INGEST_PIPELINE_INDEX
 INGEST_PIPELINE_DASHBOARD = "elasticsearch-ea5b81a0-7fbf-11ed-8509-ddabeb9daeaf"
+INGEST_PIPELINE_DASHBOARD_FIXED = "elasticsearch-ingest-pipeline-detail-fixed"
+INGEST_PIPELINE_DASHBOARD_FIXED_TITLE = (
+    "[Elasticsearch] Ingest Pipeline Detail (Fixed)"
+)
+STACK_MONITORING_DATA_VIEW = "befe6dd7-ec0b-4cb7-aa59-e4d5e6f39ae9"
+CLUSTER_INGEST_DASHBOARDS = frozenset(
+    {
+        "elasticsearch-ea888f80-61e4-11ee-b5a1-0d1803efe5cf",
+        "elasticsearch-b1399af0-628c-11ee-9c63-732d7f759a7a",
+    }
+)
 
 # Processor-level docs lack pipeline total.count; Lens orderAgg must use processor.count.
 PIPELINE_TOTAL_COUNT_FIELD = "elasticsearch.ingest_pipeline.total.count"
@@ -113,10 +127,14 @@ def fix_monitoring_ui_creds(kb, monitoring_pwd: str) -> None:
     )
 
 
+def _is_ingest_pipeline_view(view_id: str) -> bool:
+    return view_id in {INGEST_PIPELINE_DATA_VIEW, INGEST_PIPELINE_DATA_VIEW_LEGACY}
+
+
 def _runtime_map_for_view(view_id: str, runtime_map: dict) -> dict:
     """Return runtime fields appropriate for each data view."""
     runtime_map = dict(runtime_map)
-    if view_id == INGEST_PIPELINE_DATA_VIEW:
+    if _is_ingest_pipeline_view(view_id):
         # Ingest pipeline Fleet metrics already have native @timestamp. A runtime
         # @timestamp that reads doc['@timestamp'] causes a cyclic dependency when
         # controls/Lens apply dashboard time filters (search_phase_execution_exception).
@@ -142,7 +160,7 @@ def patch_data_view(kb, auth: str, view_id: str) -> None:
         except json.JSONDecodeError:
             runtime_map = {}
         runtime_map = _runtime_map_for_view(view_id, runtime_map)
-        if view_id == INGEST_PIPELINE_DATA_VIEW:
+        if _is_ingest_pipeline_view(view_id):
             attrs["title"] = INGEST_PIPELINE_INDEX
         attrs["runtimeFieldMap"] = json.dumps(runtime_map)
         attrs["allowNoIndex"] = True
@@ -165,7 +183,7 @@ def patch_data_view(kb, auth: str, view_id: str) -> None:
 
     runtime_map = _runtime_map_for_view(view_id, dict(dv.get("runtimeFieldMap") or {}))
     title = dv["title"]
-    if view_id == INGEST_PIPELINE_DATA_VIEW:
+    if _is_ingest_pipeline_view(view_id):
         title = INGEST_PIPELINE_INDEX
     body = {
         "data_view": {
@@ -189,6 +207,135 @@ def patch_data_view(kb, auth: str, view_id: str) -> None:
     )
 
 
+def _data_view_path(view_id: str) -> str:
+    return quote(view_id, safe="")
+
+
+def _replace_data_view_id_in_value(obj, old_id: str, new_id: str) -> bool:
+    """Recursively replace index-pattern/data-view ids (incl. embedded JSON strings)."""
+    changed = False
+    if isinstance(obj, dict):
+        if obj.get("id") == old_id and obj.get("type") in ("index-pattern", "data-view"):
+            obj["id"] = new_id
+            changed = True
+        for key, val in list(obj.items()):
+            if key in ("panelsJSON", "controlGroupInput") and isinstance(val, str) and old_id in val:
+                try:
+                    parsed = json.loads(val)
+                except json.JSONDecodeError:
+                    parsed = None
+                if parsed is not None and _replace_data_view_id_in_value(parsed, old_id, new_id):
+                    obj[key] = json.dumps(parsed)
+                    changed = True
+            elif _replace_data_view_id_in_value(val, old_id, new_id):
+                changed = True
+    elif isinstance(obj, list):
+        for item in obj:
+            if _replace_data_view_id_in_value(item, old_id, new_id):
+                changed = True
+    return changed
+
+
+def ensure_ingest_data_view_id_matches_title(kb, auth: str) -> bool:
+    """Align ingest data view id with index title so Lens fields API returns fields.
+
+    Working Fleet dashboards use id==title (e.g. metrics-*). elasticsearch-sm-metrics
+    with title metrics-elasticsearch.ingest_pipeline-* makes the UI call
+    /internal/data_views/fields?pattern=elasticsearch-sm-metrics → 0 fields → .map() crash.
+    """
+    old_id = INGEST_PIPELINE_DATA_VIEW_LEGACY
+    new_id = INGEST_PIPELINE_DATA_VIEW
+    print("=== Align ingest data view id with index pattern ===", flush=True)
+
+    new_resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{_data_view_path(new_id)}")
+    if new_resp.get("data_view"):
+        print(f"  OK data view {new_id} already exists", flush=True)
+    else:
+        legacy = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{old_id}").get("data_view", {})
+        if not legacy:
+            print(f"  FAIL missing legacy data view {old_id}", flush=True)
+            return False
+        runtime_map = _runtime_map_for_view(old_id, dict(legacy.get("runtimeFieldMap") or {}))
+        attrs = {
+            "title": INGEST_PIPELINE_INDEX,
+            "timeFieldName": legacy.get("timeFieldName", "@timestamp"),
+            "runtimeFieldMap": json.dumps(runtime_map),
+            "allowNoIndex": True,
+        }
+        post = kibana_curl(
+            kb,
+            auth,
+            "POST",
+            f"/api/saved_objects/index-pattern/{_data_view_path(new_id)}",
+            {"attributes": attrs},
+        )
+        if post.get("statusCode", 200) >= 400:
+            print(f"  FAIL create {new_id}: {post.get('message', post)[:200]}", flush=True)
+            return False
+        print(f"  OK created data view id={new_id}", flush=True)
+
+    # Verify fields API works with id-as-pattern (what Lens uses).
+    qs = (
+        f"pattern={quote(INGEST_PIPELINE_INDEX, safe='')}"
+        "&meta_fields=_source&allow_no_index=true&apiVersion=1"
+    )
+    fields_resp = kibana_curl(kb, auth, "GET", f"/internal/data_views/fields?{qs}")
+    fields = fields_resp.get("fields") or []
+    field_count = len(fields) if isinstance(fields, list) else len(fields or {})
+    if field_count == 0:
+        print(f"  FAIL fields API pattern={new_id}: 0 fields", flush=True)
+        return False
+    print(f"  OK fields API pattern={new_id}: {field_count} fields", flush=True)
+
+    updated = 0
+    for item in list_elasticsearch_dashboards(kb, auth):
+        did = item["id"]
+        dash = kibana_curl(kb, auth, "GET", f"/api/saved_objects/dashboard/{did}")
+        if dash.get("statusCode", 200) >= 400:
+            continue
+        attrs = dash.get("attributes", {})
+        refs = list(dash.get("references", []))
+        payload = {"attributes": dict(attrs), "references": refs}
+        if not _replace_data_view_id_in_value(payload, old_id, new_id):
+            continue
+        payload["attributes"]["version"] = int(attrs.get("version", 1) or 1) + 1
+        put = kibana_curl(
+            kb,
+            auth,
+            "PUT",
+            f"/api/saved_objects/dashboard/{did}?overwrite=true",
+            payload,
+        )
+        if put.get("statusCode", 200) >= 400:
+            print(
+                f"  FAIL repoint {item.get('attributes', {}).get('title', did)}: "
+                f"{put.get('message', put)[:120]}",
+                flush=True,
+            )
+            return False
+        updated += 1
+        print(f"  OK repointed {item.get('attributes', {}).get('title', did)}", flush=True)
+
+    fixed = kibana_curl(kb, auth, "GET", f"/api/saved_objects/dashboard/{INGEST_PIPELINE_DASHBOARD_FIXED}")
+    if fixed.get("id"):
+        attrs = fixed.get("attributes", {})
+        refs = list(fixed.get("references", []))
+        payload = {"attributes": dict(attrs), "references": refs}
+        if _replace_data_view_id_in_value(payload, old_id, new_id):
+            payload["attributes"]["version"] = int(attrs.get("version", 1) or 1) + 1
+            kibana_curl(
+                kb,
+                auth,
+                "PUT",
+                f"/api/saved_objects/dashboard/{INGEST_PIPELINE_DASHBOARD_FIXED}?overwrite=true",
+                payload,
+            )
+
+    patch_data_view(kb, auth, new_id)
+    print(f"  dashboards_updated={updated}", flush=True)
+    return True
+
+
 def reinstall_package_assets(kb, auth: str, name: str, version: str) -> None:
     print(f"=== Reinstall {name}@{version} Kibana assets ===", flush=True)
     resp = kibana_curl(
@@ -209,7 +356,7 @@ def verify_dashboard_search(kb, auth: str) -> bool:
     ok = True
     checks = [
         ("metrics-*", "metrics-*"),
-        ("elasticsearch-sm-metrics", INGEST_PIPELINE_INDEX),
+        (INGEST_PIPELINE_DATA_VIEW, INGEST_PIPELINE_INDEX),
         ("es-stack-monitoring", ".ds-.monitoring-es-*,.monitoring-es*,.ds-metrics-elasticsearch.stack_monitoring.*"),
     ]
     for label, index in checks:
@@ -344,26 +491,40 @@ def _has_exists_filter(state: dict, field: str) -> bool:
     return False
 
 
+def _is_ingest_pipeline_panel(state: dict) -> bool:
+    """True when panel queries ingest-pipeline metrics (not stack-monitoring cluster views)."""
+    if _panel_uses_processor_fields(state) or _panel_uses_pipeline_total_fields(state):
+        return True
+    blob = json.dumps(state.get("datasourceStates", {}))
+    return "ingest_pipeline" in blob
+
+
 def _patch_lens_panel_queries(state: dict) -> bool:
-    """Scope panels to processor vs pipeline docs via exists filters + base KQL."""
-    exists_field = _panel_exists_field(state)
-    if not exists_field:
-        return False
+    """Normalize panel KQL; ingest panels get base filter, SM/cluster panels stay empty."""
     changed = False
     query = state.setdefault("query", {"language": "kuery", "query": ""})
-    target_kql = INGEST_PIPELINE_KQL
-    current = " ".join((query.get("query") or "").split())
-    target_norm = " ".join(target_kql.split())
-    if current != target_norm:
+    if _is_ingest_pipeline_panel(state):
+        target_kql = INGEST_PIPELINE_KQL
+        current = " ".join((query.get("query") or "").split())
+        target_norm = " ".join(target_kql.split())
+        if current != target_norm:
+            query["language"] = "kuery"
+            query["query"] = target_kql
+            changed = True
+    elif (query.get("query") or "").strip():
+        # Cluster Ingest dashboards use metricset filters in state.filters, not KQL.
         query["language"] = "kuery"
-        query["query"] = target_kql
+        query["query"] = ""
         changed = True
-    filters = state.setdefault("filters", [])
-    if not isinstance(filters, list):
+    filters = state.get("filters")
+    if filters is None:
+        state["filters"] = []
+        changed = True
         filters = []
-        state["filters"] = filters
+    elif not isinstance(filters, list):
+        state["filters"] = []
         changed = True
-    # Drop stale exists filters and KQL-style scope suffixes from prior patches.
+        filters = []
     cleaned = [
         f
         for f in filters
@@ -374,11 +535,7 @@ def _patch_lens_panel_queries(state: dict) -> bool:
         )
     ]
     if len(cleaned) != len(filters):
-        filters = cleaned
-        state["filters"] = filters
-        changed = True
-    if not _has_exists_filter(state, exists_field):
-        filters.append(_exists_filter(exists_field))
+        state["filters"] = cleaned
         changed = True
     return changed
 
@@ -402,6 +559,8 @@ def _normalize_lens_columns(state: dict) -> bool:
 
 def _patch_lens_order_aggs(state: dict) -> bool:
     """Fix order-by metrics that are null or invalid for the doc type in each panel."""
+    if not _is_ingest_pipeline_panel(state):
+        return False
     uses_processor = _panel_uses_processor_fields(state)
     changed = False
     for col in _iter_lens_columns(state):
@@ -436,6 +595,81 @@ def _patch_lens_state(state: dict) -> bool:
     changed = _normalize_lens_columns(state)
     changed = _patch_lens_panel_queries(state) or changed
     changed = _patch_lens_order_aggs(state) or changed
+    changed = _normalize_lens_visualization(state) or changed
+    changed = _ensure_lens_defaults(state) or changed
+    return changed
+
+
+def _migrate_legacy_metric(lens_attrs: dict, state: dict) -> bool:
+    """lnsLegacyMetric crashes in Kibana 8.18 UI; migrate to lnsMetric."""
+    if lens_attrs.get("visualizationType") != "lnsLegacyMetric":
+        return False
+    viz = state.setdefault("visualization", {})
+    accessor = viz.pop("accessor", None)
+    if accessor and not viz.get("metricAccessor"):
+        viz["metricAccessor"] = accessor
+    lens_attrs["visualizationType"] = "lnsMetric"
+    return True
+
+
+def _complete_lns_metric_viz(lens_attrs: dict, state: dict) -> bool:
+    """Match working Fleet lnsMetric panels (palette/showBar present)."""
+    if lens_attrs.get("visualizationType") != "lnsMetric":
+        return False
+    viz = state.setdefault("visualization", {})
+    changed = False
+    if viz.get("showBar") is None:
+        viz["showBar"] = False
+        changed = True
+    if not viz.get("palette"):
+        viz["palette"] = {"name": "default", "type": "palette"}
+        changed = True
+    return changed
+
+
+def _normalize_lens_visualization(state: dict) -> bool:
+    """Fix visualization shapes that crash Lens renderers (.map on undefined)."""
+    changed = False
+    viz = state.get("visualization")
+    if not isinstance(viz, dict):
+        return changed
+    layers = viz.get("layers")
+    if layers is None and "layerId" not in viz:
+        viz["layers"] = []
+        changed = True
+    if isinstance(layers, list):
+        for layer in layers:
+            if not isinstance(layer, dict):
+                continue
+            if layer.get("accessors") is None:
+                layer["accessors"] = []
+                changed = True
+            if layer.get("yConfig") is None:
+                layer["yConfig"] = []
+                changed = True
+    return changed
+
+
+def _ensure_lens_defaults(state: dict) -> bool:
+    """Ensure list fields exist so Lens client code can safely .map()."""
+    changed = False
+    if state.get("internalReferences") is None:
+        state["internalReferences"] = []
+        changed = True
+    if state.get("filters") is None:
+        state["filters"] = []
+        changed = True
+    if state.get("adHocDataViews") is None:
+        state["adHocDataViews"] = {}
+        changed = True
+    layers = state.get("datasourceStates", {}).get("formBased", {}).get("layers", {})
+    for layer in layers.values():
+        if layer.get("columnOrder") is None:
+            layer["columnOrder"] = list(layer.get("columns", {}).keys())
+            changed = True
+        if layer.get("incompleteColumns") is None:
+            layer["incompleteColumns"] = {}
+            changed = True
     return changed
 
 
@@ -450,11 +684,14 @@ def list_elasticsearch_dashboards(kb, auth: str) -> list[dict]:
     return resp.get("saved_objects", [])
 
 
-def _patch_dashboard_lens_panels(attrs: dict) -> tuple[dict, list[str], int]:
-    """Normalize/patch all Lens panels; returns (attrs, patched_titles, corrupt_fixed)."""
+def _patch_dashboard_lens_panels(
+    attrs: dict, *, force_touch: bool = True
+) -> tuple[dict, list[str], int, int]:
+    """Normalize/patch Lens panels; returns (attrs, titles, corrupt_fixed, legacy_migrated)."""
     panels = json.loads(attrs.get("panelsJSON", "[]"))
     patched_titles: list[str] = []
     corrupt_fixed = 0
+    legacy_migrated = 0
     for panel in panels:
         if panel.get("type") != "lens":
             continue
@@ -464,19 +701,77 @@ def _patch_dashboard_lens_panels(attrs: dict) -> tuple[dict, list[str], int]:
         if not state_raw:
             continue
         if isinstance(state_raw, dict):
-            corrupt_fixed += 1
-        state = json.loads(state_raw) if isinstance(state_raw, str) else dict(state_raw)
-        needs_write = not isinstance(state_raw, str) or _patch_lens_state(state)
+            state = dict(state_raw)
+        elif isinstance(state_raw, str):
+            state = json.loads(state_raw)
+            if isinstance(state, str):
+                corrupt_fixed += 1
+                state = json.loads(state)
+        else:
+            continue
+        changed = _patch_lens_state(state)
+        if _migrate_legacy_metric(lens_attrs, state):
+            legacy_migrated += 1
+            changed = True
+        changed = _complete_lns_metric_viz(lens_attrs, state) or changed
+        # Kibana 8.18 dashboard embed expects state as an object, not a JSON string.
+        needs_write = force_touch or isinstance(state_raw, str) or changed
         if not needs_write:
             continue
-        lens_attrs["state"] = json.dumps(state)
+        lens_attrs["state"] = state
         emb["attributes"] = lens_attrs
         panel["embeddableConfig"] = emb
+        panel.pop("version", None)
         patched_titles.append(panel.get("title") or panel.get("id", "lens"))
     if patched_titles:
         attrs = dict(attrs)
         attrs["panelsJSON"] = json.dumps(panels)
-    return attrs, patched_titles, corrupt_fixed
+    return attrs, patched_titles, corrupt_fixed, legacy_migrated
+
+
+def clone_ingest_pipeline_dashboard(kb, auth: str) -> bool:
+    """Clone patched ingest dashboard to an unmanaged copy (avoids Fleet managed cache)."""
+    print("=== Clone ingest pipeline dashboard (unmanaged) ===", flush=True)
+    src = kibana_curl(kb, auth, "GET", f"/api/saved_objects/dashboard/{INGEST_PIPELINE_DASHBOARD}")
+    if src.get("statusCode", 200) >= 400:
+        print(f"  FAIL fetch source: {src.get('message', src)[:200]}", flush=True)
+        return False
+    attrs, _, _, _ = _patch_dashboard_lens_panels(src.get("attributes", {}))
+    attrs["title"] = INGEST_PIPELINE_DASHBOARD_FIXED_TITLE
+    attrs["version"] = 1
+    refs = [
+        r
+        for r in src.get("references", [])
+        if not (r.get("type") == "tag" and str(r.get("id", "")).startswith("fleet-"))
+    ]
+    existing = kibana_curl(kb, auth, "GET", f"/api/saved_objects/dashboard/{INGEST_PIPELINE_DASHBOARD_FIXED}")
+    if existing.get("id"):
+        put = kibana_curl(
+            kb,
+            auth,
+            "PUT",
+            f"/api/saved_objects/dashboard/{INGEST_PIPELINE_DASHBOARD_FIXED}?overwrite=true",
+            {"attributes": attrs, "references": refs},
+        )
+        action = "updated"
+    else:
+        put = kibana_curl(
+            kb,
+            auth,
+            "POST",
+            f"/api/saved_objects/dashboard/{INGEST_PIPELINE_DASHBOARD_FIXED}",
+            {"attributes": attrs, "references": refs},
+        )
+        action = "created"
+    if put.get("statusCode", 200) >= 400:
+        print(f"  FAIL clone: {put.get('message', put)[:200]}", flush=True)
+        return False
+    print(
+        f"  OK {action} {INGEST_PIPELINE_DASHBOARD_FIXED} "
+        f"title={INGEST_PIPELINE_DASHBOARD_FIXED_TITLE}",
+        flush=True,
+    )
+    return True
 
 
 def patch_elasticsearch_dashboards(kb, auth: str) -> bool:
@@ -496,10 +791,11 @@ def patch_elasticsearch_dashboards(kb, auth: str) -> bool:
             ok = False
             continue
         attrs = resp.get("attributes", {})
-        new_attrs, patched_titles, corrupt_fixed = _patch_dashboard_lens_panels(attrs)
+        new_attrs, patched_titles, corrupt_fixed, legacy_migrated = _patch_dashboard_lens_panels(attrs)
         if not patched_titles:
-            print(f"  skip {title}: lens panels already normalized", flush=True)
+            print(f"  skip {title}: no lens panels", flush=True)
             continue
+        new_attrs["version"] = int(attrs.get("version", 1) or 1) + 1
         put = kibana_curl(
             kb,
             auth,
@@ -513,7 +809,7 @@ def patch_elasticsearch_dashboards(kb, auth: str) -> bool:
             continue
         print(
             f"  OK {title}: panels={len(patched_titles)} "
-            f"corrupt_state_fixed={corrupt_fixed}",
+            f"corrupt_state_fixed={corrupt_fixed} legacy_metric_migrated={legacy_migrated}",
             flush=True,
         )
     return ok
@@ -566,7 +862,7 @@ def verify_controls_api(kb, auth: str) -> bool:
 
 
 def verify_elasticsearch_dashboards(kb, auth: str) -> bool:
-    """Ensure all [Elasticsearch] dashboards have string Lens state and working controls."""
+    """Ensure all [Elasticsearch] dashboards have dict Lens state and working controls."""
     print("=== Verify [Elasticsearch] dashboards ===", flush=True)
     ok = True
     dv_index: dict[str, str] = {}
@@ -588,13 +884,25 @@ def verify_elasticsearch_dashboards(kb, auth: str) -> bool:
                 continue
             lens_count += 1
             state_raw = panel.get("embeddableConfig", {}).get("attributes", {}).get("state")
-            if isinstance(state_raw, dict):
+            if not isinstance(state_raw, dict):
                 corrupt += 1
+        bad_kql = 0
+        for panel in panels:
+            if panel.get("type") != "lens":
+                continue
+            state_raw = panel.get("embeddableConfig", {}).get("attributes", {}).get("state")
+            if not isinstance(state_raw, dict):
+                continue
+            if not _is_ingest_pipeline_panel(state_raw) and (state_raw.get("query", {}).get("query") or "").strip():
+                bad_kql += 1
         if corrupt:
             print(f"  FAIL {title}: corrupt_lens_state={corrupt}/{lens_count}", flush=True)
             ok = False
+        elif bad_kql:
+            print(f"  FAIL {title}: non_ingest_kql={bad_kql}/{lens_count}", flush=True)
+            ok = False
         else:
-            print(f"  OK {title}: lens={lens_count} corrupt=0", flush=True)
+            print(f"  OK {title}: lens={lens_count} corrupt=0 kql_ok", flush=True)
 
         control_fields: list[str] = []
         ctrl_input = attrs.get("controlGroupInput")
@@ -712,56 +1020,59 @@ def verify_ingest_pipeline_dashboard(kb, auth: str) -> bool:
             },
         },
     )
-    resp = kibana_curl(
-        kb,
-        auth,
-        "POST",
-        "/internal/search/ese",
-        {
-            "params": {
-                "index": index,
-                "body": {
-                    "size": 0,
-                    "query": {
-                        "bool": {
-                            "filter": [
-                                {"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}},
-                                {"query_string": {"query": INGEST_PIPELINE_KQL}},
-                                {"exists": {"field": "elasticsearch.ingest_pipeline.processor.type_tag"}},
-                            ]
-                        }
-                    },
-                    "aggs": {
-                        "procs": {
-                            "multi_terms": {
-                                "terms": [
-                                    {"field": "elasticsearch.ingest_pipeline.processor.order_index"},
-                                    {"field": "elasticsearch.ingest_pipeline.processor.type_tag"},
-                                    {"field": "elasticsearch.node.name"},
-                                ],
-                                "size": 100,
-                            },
-                            "aggs": {
-                                "order_metric": {"max": {"field": PROCESSOR_COUNT_FIELD}},
-                                "sorter": {
-                                    "bucket_sort": {
-                                        "sort": [{"order_metric": {"order": "desc"}}],
-                                        "size": 10,
-                                    }
-                                },
-                            },
+    orderagg_body = {
+        "size": 0,
+        "query": {
+            "bool": {
+                "filter": [
+                    {"range": {"@timestamp": {"gte": "now-7d", "lte": "now"}}},
+                    {"query_string": {"query": INGEST_PIPELINE_KQL}},
+                    {"exists": {"field": "elasticsearch.ingest_pipeline.processor.type_tag"}},
+                ]
+            }
+        },
+        "aggs": {
+            "procs": {
+                "multi_terms": {
+                    "terms": [
+                        {"field": "elasticsearch.ingest_pipeline.processor.order_index"},
+                        {"field": "elasticsearch.ingest_pipeline.processor.type_tag"},
+                        {"field": "elasticsearch.node.name"},
+                    ],
+                    "size": 100,
+                },
+                "aggs": {
+                    "order_metric": {"max": {"field": PROCESSOR_COUNT_FIELD}},
+                    "sorter": {
+                        "bucket_sort": {
+                            "sort": [{"order_metric": {"order": "desc"}}],
+                            "size": 10,
                         }
                     },
                 },
             }
         },
+    }
+    # Direct ES search avoids Kibana async-search 200ms timeout on heavy aggs.
+    es = connect(NODES["es01"][0])
+    es_out = run(
+        es,
+        f"curl -sk -u {auth} -H 'Content-Type: application/json' "
+        f"-X POST 'https://localhost:9200/{index}/_search' "
+        f"-d '{json.dumps(orderagg_body)}'",
+        check=False,
     )
-    raw = resp.get("rawResponse", {})
+    es.close()
+    try:
+        raw = json.loads(es_out.strip().splitlines()[-1])
+    except json.JSONDecodeError:
+        raw = {}
     buckets = raw.get("aggregations", {}).get("procs", {}).get("buckets", [])
-    if raw.get("_shards", {}).get("failed", 1) or resp.get("statusCode", 200) >= 400 or not buckets:
+    err_msg = str(raw.get("error", es_out))[:200]
+    if raw.get("_shards", {}).get("failed", 1) or not buckets:
         print(
             f"  FAIL processor orderAgg (Lens breakdown sort): "
-            f"buckets={len(buckets)} err={resp.get('message', resp)[:200]}",
+            f"buckets={len(buckets)} err={err_msg}",
             flush=True,
         )
         ok = False
@@ -801,7 +1112,9 @@ def main() -> int:
     for view_id in DATA_VIEWS:
         patch_data_view(kb, auth, view_id)
 
+    ensure_ingest_data_view_id_matches_title(kb, auth)
     patch_elasticsearch_dashboards(kb, auth)
+    clone_ingest_pipeline_dashboard(kb, auth)
 
     ok = (
         verify_dashboard_search(kb, auth)

@@ -85,7 +85,7 @@ for d in dashboards:
             emb = panel.get("embeddableConfig", {})
             lens_attrs = emb.get("attributes", {})
             state_raw = lens_attrs.get("state")
-            if isinstance(state_raw, dict):
+            if not isinstance(state_raw, dict):
                 corrupt_lens += 1
             elif state_raw:
                 state = json.loads(state_raw)
