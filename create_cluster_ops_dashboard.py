@@ -699,9 +699,9 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
             "Tier mapping: es01=warm/master, es02=hot/ml, es03=cold, kbn01=kibana."
         ),
         "timeRestore": True,
-        "timeFrom": "now-24h/h",
+        "timeFrom": "now-24h",
         "timeTo": "now",
-        "refreshInterval": {"pause": True, "value": 60000},
+        "refreshInterval": {"pause": False, "value": 60000},
         "kibanaSavedObjectMeta": {
             "searchSourceJSON": json.dumps(
                 {"query": {"language": "kuery", "query": ""}, "filter": []}
