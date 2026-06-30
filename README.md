@@ -170,6 +170,7 @@ Fleet and agents trust the ES auto-configured CA via `scripts/elastic-agent-ca.s
 | `scripts/upgrade-kibana.sh` | Kibana RPM upgrade |
 | `scripts/upgrade-elastic-agent.sh` | Local agent archive upgrade |
 | `show_elastic_password.py` | Find current elastic password without reset |
+| `create_cluster_ops_dashboard.py` | Create cluster operations Kibana dashboard |
 
 ## Access
 
