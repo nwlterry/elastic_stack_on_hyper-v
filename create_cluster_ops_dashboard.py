@@ -472,7 +472,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
         _set_metric_field(
             p,
             metricset="cluster_stats",
-            metrics_only=title == "Cluster status",
+            metrics_only=True,
             **spec,
         )
         add(p)
