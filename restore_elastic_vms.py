@@ -8,13 +8,16 @@ import time
 from deploy_ordered_stack import VM_NAMES, connect, ps, run
 from upgrade_elastic_stack import SNAPSHOT_NAME
 
+# VM_NAMES is role-keyed (es01, kibana, fleet); use Hyper-V VMName values.
+ALL_VMS = list(VM_NAMES.values())
+
 # Start order after restore: ES cluster first, then Kibana, then Fleet.
 RESTORE_START_ORDER = (
-    "ISMELKESNODE01",
-    "ISMELKESNODE02",
-    "ISMELKESNODE03",
-    "ISMELKKBNNODE01",
-    "ISMELKFLNODE01",
+    VM_NAMES["es01"],
+    VM_NAMES["es02"],
+    VM_NAMES["es03"],
+    VM_NAMES["kibana"],
+    VM_NAMES["fleet"],
 )
 
 
@@ -29,18 +32,18 @@ def snapshot_exists(vm_name: str, snapshot_name: str) -> bool:
 def restore_all_vms(snapshot_name: str = SNAPSHOT_NAME) -> None:
     """Stop, restore, and restart all stack VMs from a Hyper-V checkpoint."""
     print(f"\n=== Restore all VMs from snapshot: {snapshot_name} ===", flush=True)
-    missing = [vm for vm in VM_NAMES if not snapshot_exists(vm, snapshot_name)]
+    missing = [vm for vm in ALL_VMS if not snapshot_exists(vm, snapshot_name)]
     if missing:
         raise RuntimeError(
             f"Snapshot {snapshot_name!r} missing on: {', '.join(missing)}"
         )
 
-    for vm in VM_NAMES:
+    for vm in ALL_VMS:
         print(f"  stop {vm}", flush=True)
         ps(f"Stop-VM -Name {shlex.quote(vm)} -Force -ErrorAction SilentlyContinue")
     time.sleep(10)
 
-    for vm in VM_NAMES:
+    for vm in ALL_VMS:
         print(f"  restore {vm} <- {snapshot_name}", flush=True)
         ps(
             f"Restore-VMSnapshot -VMName {shlex.quote(vm)} "
@@ -54,7 +57,7 @@ def restore_all_vms(snapshot_name: str = SNAPSHOT_NAME) -> None:
 
     print("Waiting for SSH on ES primary...", flush=True)
     connect("10.44.40.31", attempts=60).close()
-    print(f"Restored {len(VM_NAMES)} VMs from {snapshot_name}", flush=True)
+    print(f"Restored {len(ALL_VMS)} VMs from {snapshot_name}", flush=True)
 
 
 def wait_es_cluster_ready(elastic_pwd: str, timeout: int = 900) -> bool:
