@@ -60,6 +60,36 @@ def restore_all_vms(snapshot_name: str = SNAPSHOT_NAME) -> None:
     print(f"Restored {len(ALL_VMS)} VMs from {snapshot_name}", flush=True)
 
 
+def wait_for_es_api(ip: str, timeout: int = 600) -> None:
+    """Wait until Elasticsearch HTTPS API responds on a node."""
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            c = connect(ip, attempts=3)
+            code = (
+                run(
+                    c,
+                    "curl -sk -o /dev/null -w '%{http_code}' "
+                    "https://localhost:9200/ 2>/dev/null",
+                    check=False,
+                    timeout=15,
+                )
+                .strip()
+                .splitlines()[-1]
+            )
+            c.close()
+            if code and code != "000":
+                print(f"  ES API up on {ip} (http={code})", flush=True)
+                return
+        except (TimeoutError, OSError):
+            pass
+        print(f"  waiting for ES API on {ip}...", flush=True)
+        time.sleep(10)
+    raise RuntimeError(f"Elasticsearch API not ready on {ip} after {timeout}s")
+
+
 def wait_es_cluster_ready(elastic_pwd: str, timeout: int = 900) -> bool:
     from upgrade_elastic_stack import cluster_health, wait_cluster_green
     from deploy_ordered_stack import NODES, curl_elastic_auth

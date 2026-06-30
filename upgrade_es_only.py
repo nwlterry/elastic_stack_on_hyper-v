@@ -9,12 +9,18 @@ Upgrade path: 8.18.4 -> 8.19.9 (required) -> 9.4.1
 """
 from __future__ import annotations
 
+import argparse
 import json
 
 from agent_artifact_upgrade import fleet_agent_binary_version
 from deploy_ordered_stack import NODES, connect, curl_elastic_auth, get_elastic_password, run
 from finish_agent_upgrade import fleet_server_healthy
-from restore_elastic_vms import remote_rpm_version, restore_all_vms, wait_es_cluster_ready
+from restore_elastic_vms import (
+    remote_rpm_version,
+    restore_all_vms,
+    wait_es_cluster_ready,
+    wait_for_es_api,
+)
 from scan_cluster_config import main as scan_cluster_config
 from upgrade_elastic_stack import (
     BASELINE_VERSION,
@@ -73,13 +79,26 @@ def verify_unchanged_components(elastic_pwd: str) -> bool:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="ES-only upgrade (Kibana/Fleet stay at baseline)")
+    parser.add_argument(
+        "--skip-restore",
+        action="store_true",
+        help="Skip VM snapshot restore (cluster already at baseline)",
+    )
+    args = parser.parse_args()
+
     print("=== Pre-upgrade cluster config snapshot ===", flush=True)
     scan_cluster_config()
 
-    print(f"\n=== Restore all VMs: {SNAPSHOT_NAME} ===", flush=True)
-    restore_all_vms(SNAPSHOT_NAME)
+    if not args.skip_restore:
+        print(f"\n=== Restore all VMs: {SNAPSHOT_NAME} ===", flush=True)
+        restore_all_vms(SNAPSHOT_NAME)
+    else:
+        print("\n=== Skipping VM restore (--skip-restore) ===", flush=True)
 
-    es = connect(NODES["es01"][0], attempts=60)
+    es_ip = NODES["es01"][0]
+    wait_for_es_api(es_ip)
+    es = connect(es_ip, attempts=60)
     elastic_pwd = get_elastic_password(es)
     auth = curl_elastic_auth(elastic_pwd)
     print(
