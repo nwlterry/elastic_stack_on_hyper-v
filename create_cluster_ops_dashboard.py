@@ -201,14 +201,20 @@ def _set_metric_field(
     panel["embeddableConfig"]["attributes"]["state"] = state
 
 
-def _set_count_metric(
+def _set_simple_metric(
     panel: dict,
     *,
     label: str,
     kql: str,
-    field: str = "ism.shard.key",
-    metricset: str = "shard",
+    field: str,
+    operation_type: str,
+    data_type: str = "number",
+    format_id: str | None = None,
+    format_params: dict | None = None,
+    metricset: str = "cluster_stats",
+    sort_field: str = "@timestamp",
 ) -> None:
+    """Single-value metric panel matching the unassigned-shards Lens style."""
     state = _panel_state(panel)
     _, layer = _layer_bundle(state)
     viz = state["visualization"]
@@ -217,15 +223,20 @@ def _set_count_metric(
         layer["columnOrder"] = [cid for cid in layer["columnOrder"] if cid != terms_id]
         layer["columns"].pop(terms_id, None)
     metric_id = viz["metricAccessor"]
+    params: dict = {}
+    if format_id:
+        params["format"] = {"id": format_id, "params": format_params or {}}
+    if operation_type == "last_value":
+        params["sortField"] = sort_field
     layer["columns"][metric_id] = {
         "customLabel": True,
-        "dataType": "number",
+        "dataType": data_type,
         "filter": {"language": "kuery", "query": kql},
         "isBucketed": False,
         "label": label,
-        "operationType": "unique_count",
-        "params": {"format": {"id": "number", "params": {"decimals": 0}}},
-        "scale": "ratio",
+        "operationType": operation_type,
+        "params": params,
+        "scale": "ordinal" if data_type == "string" else "ratio",
         "sourceField": field,
     }
     layer["columnOrder"] = [metric_id]
@@ -234,6 +245,26 @@ def _set_count_metric(
     filter_ref = state["filters"][0]["meta"]["index"]
     state["filters"] = [_fleet_metricset_filter(metricset, filter_ref)]
     panel["embeddableConfig"]["attributes"]["state"] = state
+
+
+def _set_count_metric(
+    panel: dict,
+    *,
+    label: str,
+    kql: str,
+    field: str = "ism.shard.key",
+    metricset: str = "shard",
+) -> None:
+    _set_simple_metric(
+        panel,
+        label=label,
+        kql=kql,
+        field=field,
+        operation_type="unique_count",
+        format_id="number",
+        format_params={"decimals": 0},
+        metricset=metricset,
+    )
 
 
 def _fleet_metricset_filter(metricset: str, filter_index: str) -> dict:
@@ -442,7 +473,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
             {
                 "label": "Cluster status",
                 "field": "elasticsearch.cluster.stats.status",
-                "field_query": "elasticsearch.cluster.stats.status: *",
+                "kql": "elasticsearch.cluster.stats.status: *",
                 "data_type": "string",
             },
         ),
@@ -451,7 +482,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
             {
                 "label": "Index count",
                 "field": "elasticsearch.cluster.stats.indices.total",
-                "field_query": "elasticsearch.cluster.stats.indices.total: *",
+                "kql": "elasticsearch.cluster.stats.indices.total: *",
                 "format_id": "number",
                 "format_params": {"decimals": 0},
             },
@@ -461,7 +492,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
             {
                 "label": "Shard count",
                 "field": "elasticsearch.cluster.stats.indices.shards.count",
-                "field_query": "elasticsearch.cluster.stats.indices.shards.count: *",
+                "kql": "elasticsearch.cluster.stats.indices.shards.count: *",
                 "format_id": "number",
                 "format_params": {"decimals": 0},
             },
@@ -469,10 +500,10 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     ]
     for i, (title, spec) in enumerate(kpis):
         p = _clone_panel(metric_tpl, title, x=i * 12, y=0, w=12, h=8)
-        _set_metric_field(
+        _set_simple_metric(
             p,
             metricset="cluster_stats",
-            metrics_only=True,
+            operation_type="last_value",
             **spec,
         )
         add(p)
