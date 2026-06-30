@@ -1,6 +1,6 @@
 # Elastic Stack on Hyper-V (RHEL 8.10)
 
-Automated deployment of **Elasticsearch 8.18.4**, **Kibana**, **Fleet Server**, and **Elastic Agents** on five RHEL 8.10 Hyper-V VMs with air-gapped Fleet and custom CA enrollment.
+Automated deployment and upgrade of **Elasticsearch**, **Kibana**, **Fleet Server**, and **Elastic Agents** on five RHEL 8.10 Hyper-V VMs with air-gapped Fleet and custom CA enrollment.
 
 See **[DEPLOYMENT_STATUS.md](DEPLOYMENT_STATUS.md)** for the latest verified stack state, policy IDs, and safe commands.
 
@@ -14,7 +14,8 @@ See **[DEPLOYMENT_STATUS.md](DEPLOYMENT_STATUS.md)** for the latest verified sta
 
 - **Cluster:** `ism-elk-cluster`
 - **Domain:** `ocplab.net`
-- **Fleet / agents:** elastic-agent **8.18.4 tar.gz** (not RPM)
+- **Baseline version:** Elasticsearch / Kibana / Elastic Agent **8.18.4**
+- **Fleet / agents:** elastic-agent **tar.gz** (not RPM)
 
 ## Prerequisites
 
@@ -65,6 +66,80 @@ python run_with_pass.py fleet_ps.py
 python run_with_pass.py verify_kibana.py
 ```
 
+## Upgrade procedures
+
+### Download upgrade packages (once)
+
+```powershell
+python download_upgrade_packages.py
+```
+
+Downloads Elasticsearch/Kibana RPMs and agent archives for **8.19.9** and **9.4.1** into `packages/`.
+
+### Create pre-upgrade checkpoints (all 5 VMs)
+
+```powershell
+.\Snapshot-ElasticVMs.ps1
+# Default name: pre-upgrade-9.4.1-YYYYMMDD-HHmm
+```
+
+### Full stack upgrade (ES + Kibana + agents)
+
+Rolling path: **8.18.4 → 8.19.9 → 9.4.1**
+
+```powershell
+python upgrade_elastic_stack.py
+```
+
+Upgrades all ES nodes, Kibana, and Fleet-managed agents via artifact mirror.
+
+### ES-only upgrade (Kibana + Fleet stay at 8.18.4)
+
+Restore all VMs to the pre-upgrade snapshot, then upgrade Elasticsearch nodes only:
+
+```powershell
+python upgrade_es_only.py
+```
+
+Or restore snapshots manually, then upgrade ES:
+
+```powershell
+.\Restore-ElasticVMs.ps1 -SnapshotName pre-upgrade-9.4.1-20260629-1535
+python -c "from upgrade_elastic_stack import *; from deploy_ordered_stack import *; ..."
+```
+
+**Note:** Kibana 8.18.4 against Elasticsearch 9.4.1 is outside Elastic's supported matrix. Use for lab/testing only.
+
+### Fleet rollback + artifact upgrade
+
+When Fleet Server needs a stepped upgrade (cannot `bulk_upgrade` itself while serving `:8220`):
+
+```powershell
+python rollback_upgrade_fleet.py
+```
+
+Steps: unenroll Fleet agents → restore Fleet VM snapshot → re-enroll Fleet @ 8.18.4 → stepped enroll to 8.19.9 → 9.4.1 → `bulk_upgrade` other agents.
+
+Fallback (direct Fleet reinstall @ target):
+
+```powershell
+python rollback_reinstall_fleet.py
+```
+
+When Fleet is already at target and only other agents need upgrading:
+
+```powershell
+python fleet_bulk_upgrade_agents.py
+```
+
+### Restore all VMs from checkpoint
+
+```powershell
+.\Restore-ElasticVMs.ps1 -SnapshotName pre-upgrade-9.4.1-20260629-1535
+# Or:
+python restore_elastic_vms.py
+```
+
 ## x.509 / Elasticsearch CA
 
 Fleet and agents trust the ES auto-configured CA via `scripts/elastic-agent-ca.sh`:
@@ -81,9 +156,19 @@ Fleet and agents trust the ES auto-configured CA via `scripts/elastic-agent-ca.s
 | `deploy_local_epr.py` | Local EPR mock + air-gap Fleet config |
 | `redeploy_fleet_only.py` | Fleet Server only (with CA); skips if healthy |
 | `resume_agent_deploy.py` | Agent policies + deploy; skips if 5 agents up |
+| `Snapshot-ElasticVMs.ps1` | Create Hyper-V checkpoints on all 5 VMs |
+| `Restore-ElasticVMs.ps1` | Restore all 5 VMs from a named checkpoint |
+| `upgrade_elastic_stack.py` | Full stack rolling upgrade to 9.4.1 |
+| `upgrade_es_only.py` | Restore snapshots + ES-only upgrade |
+| `rollback_upgrade_fleet.py` | Fleet artifact rollback/upgrade (primary) |
+| `rollback_reinstall_fleet.py` | Fleet rollback via direct reinstall (fallback) |
+| `fleet_bulk_upgrade_agents.py` | Agent bulk_upgrade when Fleet already at target |
+| `download_upgrade_packages.py` | Fetch offline RPMs/archives for upgrade |
 | `scripts/install-fleet-server.sh` | Archive Fleet Server + custom CA |
 | `scripts/install-elastic-agent.sh` | Archive agent enroll + custom CA |
-| `scripts/configure-fleet-airgap.sh` | Kibana air-gap settings |
+| `scripts/upgrade-elasticsearch-node.sh` | Single-node ES rolling upgrade |
+| `scripts/upgrade-kibana.sh` | Kibana RPM upgrade |
+| `scripts/upgrade-elastic-agent.sh` | Local agent archive upgrade |
 | `show_elastic_password.py` | Find current elastic password without reset |
 
 ## Access
