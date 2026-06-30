@@ -52,7 +52,6 @@ SYSTEM_UPTIME_RUNTIME_FIELDS = {
             },
         }
         for field, part in [
-            ("ism.uptime.years", "years"),
             ("ism.uptime.months", "months"),
             ("ism.uptime.days", "days"),
             ("ism.uptime.hours", "hours"),
@@ -376,7 +375,6 @@ def _set_uptime_table(panel: dict, *, host: str, tier: str) -> None:
     layer_id, _old_layer = _layer_bundle(state)
     bucket_id = str(uuid.uuid4())
     part_specs = [
-        ("Year", "ism.uptime.years"),
         ("Month", "ism.uptime.months"),
         ("Day", "ism.uptime.days"),
         ("Hour", "ism.uptime.hours"),
@@ -582,20 +580,22 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     add(unassigned)
 
     y0 = 8
-    uptime_h = 8
+    uptime_h = 7
+    uptime_cols = 3
     for i, (tier, host) in enumerate(TIER_HOSTS.items()):
         p = _clone_panel(
             table_tpl,
             f"System uptime — {host} ({tier})",
-            x=(i % 2) * 24,
-            y=y0 + (i // 2) * uptime_h,
-            w=24,
+            x=(i % uptime_cols) * 16,
+            y=y0 + (i // uptime_cols) * uptime_h,
+            w=16,
             h=uptime_h,
         )
         _set_uptime_table(p, host=host, tier=tier)
         add(p)
 
-    bottom_y = y0 + ((len(TIER_HOSTS) + 1) // 2) * uptime_h
+    uptime_rows = (len(TIER_HOSTS) + uptime_cols - 1) // uptime_cols
+    bottom_y = y0 + uptime_rows * uptime_h
     total_id, used_id, avail_id, pct_id = (
         str(uuid.uuid4()),
         str(uuid.uuid4()),
