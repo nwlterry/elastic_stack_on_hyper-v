@@ -568,7 +568,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     )
     add(disk)
 
-    jvm_id = str(uuid.uuid4())
+    jvm_used_id, jvm_max_id, jvm_pct_id = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
     jvm = _clone_panel(table_tpl, "ES node JVM heap usage", x=24, y=22, w=24, h=14)
     _set_node_table(
         jvm,
@@ -578,15 +578,34 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
         bucket_label="Node",
         metrics=[
             {
-                "id": jvm_id,
+                "id": jvm_used_id,
                 "column": _lv_col(
-                    jvm_id,
+                    jvm_used_id,
+                    "JVM heap used",
+                    "elasticsearch.node.stats.jvm.mem.heap.used.bytes",
+                    fmt={"id": "bytes", "params": {"decimals": 1}},
+                ),
+            },
+            {
+                "id": jvm_max_id,
+                "column": _lv_col(
+                    jvm_max_id,
+                    "JVM heap max",
+                    "elasticsearch.node.stats.jvm.mem.heap.max.bytes",
+                    fmt={"id": "bytes", "params": {"decimals": 1}},
+                ),
+            },
+            {
+                "id": jvm_pct_id,
+                "column": _lv_col(
+                    jvm_pct_id,
                     "JVM heap %",
                     "elasticsearch.node.stats.jvm.mem.heap.used.pct",
-                    fmt={"id": "number", "params": {"decimals": 0}},
+                    fmt={"id": "number", "params": {"decimals": 0, "suffix": "%"}},
                 ),
             },
         ],
+        order_by_metric_id=jvm_pct_id,
     )
     add(jvm)
 
