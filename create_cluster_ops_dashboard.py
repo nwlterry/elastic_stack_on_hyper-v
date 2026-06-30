@@ -22,6 +22,17 @@ from fix_dashboard_search import (
     kibana_curl,
 )
 
+SYSTEM_UPTIME_RUNTIME_FIELDS = {
+    "ism.uptime.duration.sec": {
+        "type": "double",
+        "script": {
+            "source": (
+                "if (doc['system.uptime.duration.ms'].size() == 0) return; "
+                "emit(doc['system.uptime.duration.ms'].value / 1000.0);"
+            )
+        },
+    },
+}
 CLUSTER_OPS_RUNTIME_FIELDS = {
     "ism.node.disk.used.pct": {
         "type": "double",
@@ -32,6 +43,19 @@ CLUSTER_OPS_RUNTIME_FIELDS = {
                 "double total = doc['elasticsearch.node.stats.fs.total.total_in_bytes'].value; "
                 "double avail = doc['elasticsearch.node.stats.fs.total.available_in_bytes'].value; "
                 "emit(Math.round((1.0 - avail / total) * 1000.0) / 10.0);"
+            )
+        },
+    },
+    "ism.shard.key": {
+        "type": "keyword",
+        "script": {
+            "source": (
+                "if (doc['elasticsearch.index.name'].size() == 0 "
+                "|| doc['elasticsearch.shard.number'].size() == 0) return; "
+                "String pri = doc['elasticsearch.shard.primary'].size() > 0 "
+                "? doc['elasticsearch.shard.primary'].value.toString() : '?'; "
+                "emit(doc['elasticsearch.index.name'].value + ':' + "
+                "doc['elasticsearch.shard.number'].value + ':' + pri);"
             )
         },
     },
@@ -127,6 +151,20 @@ def _dash_refs_for_panel(panel: dict) -> list[dict]:
     ]
 
 
+def _strip_metric_breakdown(state: dict) -> None:
+    layer_id, layer = _layer_bundle(state)
+    viz = state["visualization"]
+    terms_id = viz.pop("breakdownByAccessor", None)
+    if terms_id:
+        layer["columnOrder"] = [cid for cid in layer["columnOrder"] if cid != terms_id]
+        layer["columns"].pop(terms_id, None)
+    metric_id = viz["metricAccessor"]
+    layer["columnOrder"] = [metric_id]
+    viz.pop("collapseFn", None)
+    viz.pop("maxCols", None)
+    viz.pop("palette", None)
+
+
 def _set_metric_field(
     panel: dict,
     *,
@@ -137,6 +175,7 @@ def _set_metric_field(
     format_id: str | None = None,
     format_params: dict | None = None,
     metricset: str = "cluster_stats",
+    metrics_only: bool = False,
 ) -> None:
     state = _panel_state(panel)
     _, layer = _layer_bundle(state)
@@ -154,6 +193,9 @@ def _set_metric_field(
     elif "format" in metric.get("params", {}):
         metric["params"].pop("format", None)
 
+    if metrics_only:
+        _strip_metric_breakdown(state)
+
     filter_ref = state["filters"][0]["meta"]["index"]
     state["filters"] = [_fleet_metricset_filter(metricset, filter_ref)]
     panel["embeddableConfig"]["attributes"]["state"] = state
@@ -164,7 +206,7 @@ def _set_count_metric(
     *,
     label: str,
     kql: str,
-    field: str = "elasticsearch.shard.id",
+    field: str = "ism.shard.key",
     metricset: str = "shard",
 ) -> None:
     state = _panel_state(panel)
@@ -237,15 +279,36 @@ def _fleet_metricset_filter(metricset: str, filter_index: str) -> dict:
     }
 
 
-def _set_uptime_metric(panel: dict, *, label: str, host: str) -> None:
+def _set_uptime_metric(panel: dict, *, host: str, tier: str) -> None:
     state = _panel_state(panel)
     layer_id, layer = _layer_bundle(state)
     viz = state["visualization"]
     metric_id = viz["metricAccessor"]
-    terms_id = viz.pop("breakdownByAccessor", None)
-    if terms_id:
-        layer["columnOrder"] = [cid for cid in layer["columnOrder"] if cid != terms_id]
-        layer["columns"].pop(terms_id, None)
+    host_id = viz.get("breakdownByAccessor") or str(uuid.uuid4())
+    viz["breakdownByAccessor"] = host_id
+    viz.setdefault("collapseFn", "")
+    viz.setdefault("maxCols", 5)
+    layer["columns"][host_id] = {
+        "customLabel": True,
+        "dataType": "string",
+        "isBucketed": True,
+        "label": "Host",
+        "operationType": "terms",
+        "params": {
+            "exclude": [],
+            "excludeIsRegex": False,
+            "include": [host],
+            "includeIsRegex": False,
+            "missingBucket": False,
+            "orderBy": {"type": "column", "columnId": metric_id},
+            "orderDirection": "desc",
+            "otherBucket": False,
+            "parentFormat": {"id": "terms"},
+            "size": 1,
+        },
+        "scale": "ordinal",
+        "sourceField": "host.name",
+    }
     layer["columns"][metric_id] = {
         "customLabel": True,
         "dataType": "number",
@@ -254,18 +317,24 @@ def _set_uptime_metric(panel: dict, *, label: str, host: str) -> None:
             "query": f'host.name : "{host}" and data_stream.dataset : "system.uptime"',
         },
         "isBucketed": False,
-        "label": label,
+        "label": f"Uptime ({tier})",
         "operationType": "last_value",
         "params": {
             "sortField": "@timestamp",
-            "format": {"id": "duration", "params": {"decimals": 1}},
+            "format": {
+                "id": "duration",
+                "params": {
+                    "inputFormat": "seconds",
+                    "outputFormat": "humanizePrecise",
+                    "useShortSuffix": True,
+                    "decimals": 1,
+                },
+            },
         },
         "scale": "ratio",
-        "sourceField": "system.uptime.duration.ms",
+        "sourceField": "ism.uptime.duration.sec",
     }
-    layer["columnOrder"] = [metric_id]
-    viz.pop("collapseFn", None)
-    viz.pop("maxCols", None)
+    layer["columnOrder"] = [host_id, metric_id]
     state["filters"] = []
     attrs = panel["embeddableConfig"]["attributes"]
     attrs["state"] = state
@@ -400,7 +469,12 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     ]
     for i, (title, spec) in enumerate(kpis):
         p = _clone_panel(metric_tpl, title, x=i * 12, y=0, w=12, h=8)
-        _set_metric_field(p, metricset="cluster_stats", **spec)
+        _set_metric_field(
+            p,
+            metricset="cluster_stats",
+            metrics_only=title == "Cluster status",
+            **spec,
+        )
         add(p)
 
     unassigned = _clone_panel(metric_tpl, "Unassigned shards (5m)", x=36, y=0, w=12, h=8)
@@ -417,9 +491,9 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
 
     y0 = 8
     for i, (tier, host) in enumerate(TIER_HOSTS.items()):
-        title = f"System uptime ({tier})"
+        title = f"System uptime — {host} ({tier})"
         p = _clone_panel(metric_tpl, title, x=(i % 3) * 16, y=y0 + (i // 3) * 7, w=16, h=7)
-        _set_uptime_metric(p, label=f"Uptime — {tier}", host=host)
+        _set_uptime_metric(p, host=host, tier=tier)
         add(p)
 
     total_id, avail_id, pct_id = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
@@ -548,28 +622,53 @@ def ensure_cluster_ops_runtime_fields(kb, auth: str) -> bool:
 
 def ensure_system_metrics_data_view(kb, auth: str) -> bool:
     dv_id = SYS_DV
-    if kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{_data_view_path(dv_id)}").get(
-        "data_view"
-    ):
-        print(f"  OK data view {dv_id} exists", flush=True)
-        return True
-    attrs = {
-        "title": dv_id,
-        "timeFieldName": "@timestamp",
-        "runtimeFieldMap": json.dumps({}),
-        "allowNoIndex": True,
-    }
-    resp = kibana_curl(
+    view_path = _data_view_path(dv_id)
+    resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{view_path}")
+    dv = resp.get("data_view")
+    if not dv:
+        attrs = {
+            "title": dv_id,
+            "timeFieldName": "@timestamp",
+            "runtimeFieldMap": json.dumps({}),
+            "allowNoIndex": True,
+        }
+        create = kibana_curl(
+            kb,
+            auth,
+            "POST",
+            f"/api/saved_objects/index-pattern/{view_path}",
+            {"attributes": attrs},
+        )
+        if create.get("statusCode", 200) >= 400:
+            print(f"  FAIL create {dv_id}: {create.get('message', create)[:200]}", flush=True)
+            return False
+        resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{view_path}")
+        dv = resp.get("data_view")
+        if not dv:
+            print(f"  FAIL missing data view {dv_id} after create", flush=True)
+            return False
+
+    runtime_map = _runtime_map_for_view(dv_id, dict(dv.get("runtimeFieldMap") or {}))
+    runtime_map.update(SYSTEM_UPTIME_RUNTIME_FIELDS)
+    put = kibana_curl(
         kb,
         auth,
         "POST",
-        f"/api/saved_objects/index-pattern/{_data_view_path(dv_id)}",
-        {"attributes": attrs},
+        f"/api/data_views/data_view/{view_path}",
+        {
+            "data_view": {
+                "title": dv["title"],
+                "name": dv.get("name"),
+                "timeFieldName": dv.get("timeFieldName", "@timestamp"),
+                "runtimeFieldMap": runtime_map,
+                "allowNoIndex": True,
+            }
+        },
     )
-    if resp.get("statusCode", 200) >= 400:
-        print(f"  FAIL create {dv_id}: {resp.get('message', resp)[:200]}", flush=True)
+    if put.get("statusCode", 200) >= 400:
+        print(f"  FAIL system runtime fields: {put.get('message', put)[:200]}", flush=True)
         return False
-    print(f"  OK created data view {dv_id}", flush=True)
+    print(f"  OK runtime fields {list(SYSTEM_UPTIME_RUNTIME_FIELDS)} on {dv_id}", flush=True)
     return True
 
 
