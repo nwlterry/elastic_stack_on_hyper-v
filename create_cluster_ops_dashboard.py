@@ -22,6 +22,15 @@ from fix_dashboard_search import (
     kibana_curl,
 )
 
+_UPTIME_DECOMPOSE_SCRIPT = (
+    "long totalSec = doc['system.uptime.duration.ms'].value / 1000L; "
+    "long years = totalSec / 31536000L; totalSec = totalSec % 31536000L; "
+    "long months = totalSec / 2592000L; totalSec = totalSec % 2592000L; "
+    "long days = totalSec / 86400L; totalSec = totalSec % 86400L; "
+    "long hours = totalSec / 3600L; totalSec = totalSec % 3600L; "
+    "long minutes = totalSec / 60L; "
+    "long seconds = totalSec % 60L; "
+)
 SYSTEM_UPTIME_RUNTIME_FIELDS = {
     "ism.uptime.duration.sec": {
         "type": "double",
@@ -31,6 +40,25 @@ SYSTEM_UPTIME_RUNTIME_FIELDS = {
                 "emit(doc['system.uptime.duration.ms'].value / 1000.0);"
             )
         },
+    },
+    **{
+        field: {
+            "type": "long",
+            "script": {
+                "source": (
+                    "if (doc['system.uptime.duration.ms'].size() == 0) return; "
+                    f"{_UPTIME_DECOMPOSE_SCRIPT}emit({part});"
+                )
+            },
+        }
+        for field, part in [
+            ("ism.uptime.years", "years"),
+            ("ism.uptime.months", "months"),
+            ("ism.uptime.days", "days"),
+            ("ism.uptime.hours", "hours"),
+            ("ism.uptime.minutes", "minutes"),
+            ("ism.uptime.seconds", "seconds"),
+        ]
     },
 }
 CLUSTER_OPS_RUNTIME_FIELDS = {
@@ -322,37 +350,8 @@ def _fleet_metricset_filter(metricset: str, filter_index: str) -> dict:
     }
 
 
-def _set_uptime_metric(panel: dict, *, host: str, tier: str) -> None:
-    state = _panel_state(panel)
-    layer_id, layer = _layer_bundle(state)
-    viz = state["visualization"]
-    metric_id = viz["metricAccessor"]
-    host_id = viz.get("breakdownByAccessor") or str(uuid.uuid4())
-    viz["breakdownByAccessor"] = host_id
-    viz.setdefault("collapseFn", "")
-    viz.setdefault("maxCols", 5)
-    layer["columns"][host_id] = {
-        "customLabel": True,
-        "dataType": "string",
-        "isBucketed": True,
-        "label": "Host",
-        "operationType": "terms",
-        "params": {
-            "exclude": [],
-            "excludeIsRegex": False,
-            "include": [host],
-            "includeIsRegex": False,
-            "missingBucket": False,
-            "orderBy": {"type": "column", "columnId": metric_id},
-            "orderDirection": "desc",
-            "otherBucket": False,
-            "parentFormat": {"id": "terms"},
-            "size": 1,
-        },
-        "scale": "ordinal",
-        "sourceField": "host.name",
-    }
-    layer["columns"][metric_id] = {
+def _uptime_lv_col(col_id: str, label: str, field: str, *, host: str) -> dict:
+    return {
         "customLabel": True,
         "dataType": "number",
         "filter": {
@@ -360,30 +359,80 @@ def _set_uptime_metric(panel: dict, *, host: str, tier: str) -> None:
             "query": f'host.name : "{host}" and data_stream.dataset : "system.uptime"',
         },
         "isBucketed": False,
-        "label": f"Uptime ({tier})",
+        "label": label,
         "operationType": "last_value",
         "params": {
             "sortField": "@timestamp",
-            "format": {
-                "id": "duration",
-                "params": {
-                    "inputFormat": "seconds",
-                    "outputFormat": "humanizePrecise",
-                    "useShortSuffix": True,
-                    "decimals": 1,
-                },
-            },
+            "format": {"id": "number", "params": {"decimals": 0}},
         },
         "scale": "ratio",
-        "sourceField": "ism.uptime.duration.sec",
+        "sourceField": field,
     }
-    layer["columnOrder"] = [host_id, metric_id]
+
+
+def _set_uptime_table(panel: dict, *, host: str, tier: str) -> None:
+    title = f"System uptime — {host} ({tier})"
+    state = _panel_state(panel)
+    layer_id, _old_layer = _layer_bundle(state)
+    bucket_id = str(uuid.uuid4())
+    part_specs = [
+        ("Year", "ism.uptime.years"),
+        ("Month", "ism.uptime.months"),
+        ("Day", "ism.uptime.days"),
+        ("Hour", "ism.uptime.hours"),
+        ("Minute", "ism.uptime.minutes"),
+        ("Second", "ism.uptime.seconds"),
+    ]
+    metric_ids = [str(uuid.uuid4()) for _ in part_specs]
+    cols: dict = {
+        bucket_id: {
+            "customLabel": True,
+            "dataType": "string",
+            "isBucketed": True,
+            "label": "Host",
+            "operationType": "terms",
+            "params": {
+                "exclude": [],
+                "excludeIsRegex": False,
+                "include": [host],
+                "includeIsRegex": False,
+                "missingBucket": False,
+                "orderBy": {"type": "column", "columnId": metric_ids[0]},
+                "orderDirection": "desc",
+                "otherBucket": False,
+                "parentFormat": {"id": "terms"},
+                "size": 1,
+            },
+            "scale": "ordinal",
+            "sourceField": "host.name",
+        }
+    }
+    column_order = [bucket_id]
+    viz_columns = [{"columnId": bucket_id}]
+    for (label, field), col_id in zip(part_specs, metric_ids, strict=True):
+        cols[col_id] = _uptime_lv_col(col_id, label, field, host=host)
+        column_order.append(col_id)
+        viz_columns.append({"columnId": col_id})
+
+    state["datasourceStates"]["formBased"]["layers"][layer_id] = {
+        "columnOrder": column_order,
+        "columns": cols,
+        "incompleteColumns": {},
+        "sampling": 0.1,
+    }
     state["filters"] = []
+    state["visualization"] = {
+        "columns": viz_columns,
+        "layerId": layer_id,
+        "layerType": "data",
+    }
     attrs = panel["embeddableConfig"]["attributes"]
+    attrs["title"] = title
     attrs["state"] = state
     attrs["references"] = [
         {"id": SYS_DV, "name": f"indexpattern-datasource-layer-{layer_id}", "type": "index-pattern"},
     ]
+    panel["title"] = title
 
 
 def _set_node_table(
@@ -533,19 +582,27 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     add(unassigned)
 
     y0 = 8
+    uptime_h = 8
     for i, (tier, host) in enumerate(TIER_HOSTS.items()):
-        title = f"System uptime — {host} ({tier})"
-        p = _clone_panel(metric_tpl, title, x=(i % 3) * 16, y=y0 + (i // 3) * 7, w=16, h=7)
-        _set_uptime_metric(p, host=host, tier=tier)
+        p = _clone_panel(
+            table_tpl,
+            f"System uptime — {host} ({tier})",
+            x=(i % 2) * 24,
+            y=y0 + (i // 2) * uptime_h,
+            w=24,
+            h=uptime_h,
+        )
+        _set_uptime_table(p, host=host, tier=tier)
         add(p)
 
+    bottom_y = y0 + ((len(TIER_HOSTS) + 1) // 2) * uptime_h
     total_id, used_id, avail_id, pct_id = (
         str(uuid.uuid4()),
         str(uuid.uuid4()),
         str(uuid.uuid4()),
         str(uuid.uuid4()),
     )
-    disk = _clone_panel(table_tpl, "ES node disk usage by tier", x=0, y=22, w=24, h=14)
+    disk = _clone_panel(table_tpl, "ES node disk usage by tier", x=0, y=bottom_y, w=24, h=14)
     _set_node_table(
         disk,
         title="ES node disk usage by tier",
@@ -595,7 +652,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     add(disk)
 
     jvm_used_id, jvm_max_id, jvm_pct_id = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
-    jvm = _clone_panel(table_tpl, "ES node JVM heap usage", x=24, y=22, w=24, h=14)
+    jvm = _clone_panel(table_tpl, "ES node JVM heap usage", x=24, y=bottom_y, w=24, h=14)
     _set_node_table(
         jvm,
         title="ES node JVM heap usage",
