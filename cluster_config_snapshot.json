@@ -1,5 +1,5 @@
 {
-  "scanned_at": "2026-06-29T07:56:57.960229+00:00",
+  "scanned_at": "2026-06-30T02:54:19.845345+00:00",
   "cluster": {
     "name": "ism-elk-cluster",
     "status": "green",
@@ -13,6 +13,7 @@
       "ent-search-generic-ingestion",
       "logs-apm.app@default-pipeline",
       "logs-apm.error@default-pipeline",
+      "logs-apm@pipeline",
       "logs-default-pipeline",
       "logs-elastic_agent-2.3.0",
       "logs-elastic_agent.apm_server-2.3.0",
@@ -85,8 +86,7 @@
       "metrics-elasticsearch.stack_monitoring.node_stats-1.12.0",
       "metrics-elasticsearch.stack_monitoring.pending_tasks-1.12.0",
       "metrics-elasticsearch.stack_monitoring.shard-1.12.0",
-      "metrics-fleet_server.agent_status-1.6.0",
-      "metrics-fleet_server.agent_versions-1.6.0"
+      "metrics-fleet_server.agent_status-1.6.0"
     ],
     "index_templates": [
       "logs-apm.error@template",
@@ -130,15 +130,15 @@
       "behavioral_analytics-events-default",
       "synthetics-http",
       "metrics-elastic_agent.osquerybeat",
+      "metrics-service_destination.10m.otel@template",
+      "metrics-service_destination.1m.otel@template",
       "metrics-elasticsearch.ingest_pipeline",
       "elastic-connectors",
       ".kibana-siem-rule-migrations-resources",
       "logs-elastic_agent.metricbeat",
       "logs-elasticsearch.slowlog",
       ".alerts-default.alerts-default-index-template",
-      "synthetics-tcp",
-      "metrics-kibana.stack_monitoring.cluster_actions",
-      "elastic-connectors-sync-jobs"
+      "synthetics-tcp"
     ],
     "metrics_data_streams": [
       "metrics-elastic_agent.elastic_agent-default",
@@ -184,7 +184,7 @@
     "agents": [
       {
         "id": "009f4d34-7546-4f88-b834-da85f09465b8",
-        "status": "online",
+        "status": "offline",
         "policy_id": "3b226858-3140-4a6b-b044-05dc7819a338"
       },
       {
@@ -194,7 +194,7 @@
       },
       {
         "id": "e4073cc1-f6b7-49df-b797-2d45bf304441",
-        "status": "online",
+        "status": "offline",
         "policy_id": "f4826033-d0e6-427a-a02e-d6e9369e5976"
       },
       {
@@ -204,7 +204,7 @@
       },
       {
         "id": "58910916-8e26-4390-bf3e-e1ba6cbf37fb",
-        "status": "online",
+        "status": "offline",
         "policy_id": "9be39452-a297-4b8b-9fae-b12ab3cb9315"
       }
     ],
@@ -348,6 +348,62 @@
   ],
   "alert_rules": [
     {
+      "id": "93602ea6-7eee-4105-a3c9-187ac0dc56e8",
+      "name": "CCR read exceptions",
+      "rule_type_id": "monitoring_ccr_read_exceptions",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "64a93cb9-b4dd-4061-96a8-86578d5292bd",
+      "name": "Thread pool write rejections",
+      "rule_type_id": "monitoring_alert_thread_pool_write_rejections",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "ae9627d3-a945-466c-8640-4b38474328ae",
+      "name": "CPU Usage",
+      "rule_type_id": "monitoring_alert_cpu_usage",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "8b169be7-40a1-4cbf-8a99-eeeb9ed341a1",
+      "name": "Thread pool search rejections",
+      "rule_type_id": "monitoring_alert_thread_pool_search_rejections",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "d3fa92b9-3a3d-4911-be03-643de8a956ab",
+      "name": "Memory Usage (JVM)",
+      "rule_type_id": "monitoring_alert_jvm_memory_usage",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "d1b8e680-bcb9-42ff-aaf9-274aa7f4c667",
+      "name": "Cluster health",
+      "rule_type_id": "monitoring_alert_cluster_health",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "f9d55b40-7f22-45d2-8f86-73876d3ad5e8",
+      "name": "Missing monitoring data",
+      "rule_type_id": "monitoring_alert_missing_monitoring_data",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
+      "id": "032543d2-0770-4ec9-a3fc-d5e98082c78a",
+      "name": "Nodes changed",
+      "rule_type_id": "monitoring_alert_nodes_changed",
+      "enabled": true,
+      "consumer": "monitoring"
+    },
+    {
       "id": "244a26aa-8c69-4a16-b00f-b9dd47b0a56b",
       "name": "Logstash version mismatch",
       "rule_type_id": "monitoring_alert_logstash_version_mismatch",
@@ -376,41 +432,6 @@
       "consumer": "monitoring"
     },
     {
-      "id": "f9d55b40-7f22-45d2-8f86-73876d3ad5e8",
-      "name": "Missing monitoring data",
-      "rule_type_id": "monitoring_alert_missing_monitoring_data",
-      "enabled": true,
-      "consumer": "monitoring"
-    },
-    {
-      "id": "635dc63a-36ce-4789-99fd-257e6f04e0cd",
-      "name": "Shard size",
-      "rule_type_id": "monitoring_shard_size",
-      "enabled": true,
-      "consumer": "monitoring"
-    },
-    {
-      "id": "ae9627d3-a945-466c-8640-4b38474328ae",
-      "name": "CPU Usage",
-      "rule_type_id": "monitoring_alert_cpu_usage",
-      "enabled": true,
-      "consumer": "monitoring"
-    },
-    {
-      "id": "8b169be7-40a1-4cbf-8a99-eeeb9ed341a1",
-      "name": "Thread pool search rejections",
-      "rule_type_id": "monitoring_alert_thread_pool_search_rejections",
-      "enabled": true,
-      "consumer": "monitoring"
-    },
-    {
-      "id": "64a93cb9-b4dd-4061-96a8-86578d5292bd",
-      "name": "Thread pool write rejections",
-      "rule_type_id": "monitoring_alert_thread_pool_write_rejections",
-      "enabled": true,
-      "consumer": "monitoring"
-    },
-    {
       "id": "d13d1cfa-0623-4df0-9f33-c61c08b18c6a",
       "name": "Disk Usage",
       "rule_type_id": "monitoring_alert_disk_usage",
@@ -418,30 +439,9 @@
       "consumer": "monitoring"
     },
     {
-      "id": "d3fa92b9-3a3d-4911-be03-643de8a956ab",
-      "name": "Memory Usage (JVM)",
-      "rule_type_id": "monitoring_alert_jvm_memory_usage",
-      "enabled": true,
-      "consumer": "monitoring"
-    },
-    {
-      "id": "93602ea6-7eee-4105-a3c9-187ac0dc56e8",
-      "name": "CCR read exceptions",
-      "rule_type_id": "monitoring_ccr_read_exceptions",
-      "enabled": true,
-      "consumer": "monitoring"
-    },
-    {
-      "id": "d1b8e680-bcb9-42ff-aaf9-274aa7f4c667",
-      "name": "Cluster health",
-      "rule_type_id": "monitoring_alert_cluster_health",
-      "enabled": true,
-      "consumer": "monitoring"
-    },
-    {
-      "id": "032543d2-0770-4ec9-a3fc-d5e98082c78a",
-      "name": "Nodes changed",
-      "rule_type_id": "monitoring_alert_nodes_changed",
+      "id": "635dc63a-36ce-4789-99fd-257e6f04e0cd",
+      "name": "Shard size",
+      "rule_type_id": "monitoring_shard_size",
       "enabled": true,
       "consumer": "monitoring"
     }

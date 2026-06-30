@@ -10,8 +10,8 @@
 | Elastic Agents | ES×3 + Kibana + Fleet | — | 5 enrolled |
 
 - **Cluster:** `ism-elk-cluster`
-- **Baseline version:** Elasticsearch / Kibana / Elastic Agent **8.18.4**
-- **Upgrade target:** Elasticsearch **9.4.1** (ES-only path keeps Kibana/Fleet at 8.18.4)
+- **Current versions:** Elasticsearch **9.4.1**; Kibana / Fleet Server / agents **8.18.4**
+- **Baseline snapshot:** `pre-upgrade-9.4.1-20260629-1535` (rollback point for all 5 VMs)
 - **Install method:** RPM (ES/Kibana), **tar.gz archive** (Fleet Server + agents)
 - **Pre-upgrade snapshot:** `pre-upgrade-9.4.1-20260629-1535` (all 5 VMs)
 
