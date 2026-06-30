@@ -46,6 +46,18 @@ CLUSTER_OPS_RUNTIME_FIELDS = {
             )
         },
     },
+    "ism.node.disk.used.bytes": {
+        "type": "double",
+        "script": {
+            "source": (
+                "if (doc['elasticsearch.node.stats.fs.total.total_in_bytes'].size() == 0 "
+                "|| doc['elasticsearch.node.stats.fs.total.available_in_bytes'].size() == 0) return; "
+                "double total = doc['elasticsearch.node.stats.fs.total.total_in_bytes'].value; "
+                "double avail = doc['elasticsearch.node.stats.fs.total.available_in_bytes'].value; "
+                "emit(total - avail);"
+            )
+        },
+    },
     "ism.shard.key": {
         "type": "keyword",
         "script": {
@@ -527,7 +539,12 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
         _set_uptime_metric(p, host=host, tier=tier)
         add(p)
 
-    total_id, avail_id, pct_id = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    total_id, used_id, avail_id, pct_id = (
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+        str(uuid.uuid4()),
+    )
     disk = _clone_panel(table_tpl, "ES node disk usage by tier", x=0, y=22, w=24, h=14)
     _set_node_table(
         disk,
@@ -542,6 +559,15 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
                     total_id,
                     "Disk total",
                     "elasticsearch.node.stats.fs.total.total_in_bytes",
+                    fmt={"id": "bytes", "params": {"decimals": 1}},
+                ),
+            },
+            {
+                "id": used_id,
+                "column": _lv_col(
+                    used_id,
+                    "Disk used",
+                    "ism.node.disk.used.bytes",
                     fmt={"id": "bytes", "params": {"decimals": 1}},
                 ),
             },
