@@ -15,6 +15,8 @@ from urllib.parse import quote
 from deploy_ordered_stack import NODES, connect, curl_elastic_auth, get_elastic_password, run
 from fix_dashboard_search import (
     STACK_MONITORING_INDEX,
+    _complete_lns_metric_viz,
+    _ensure_lens_defaults,
     _runtime_map_for_view,
     fix_monitoring_ui_creds,
     kibana_curl,
@@ -264,6 +266,23 @@ def _dash_refs_for_panel(panel: dict) -> list[dict]:
             }
         )
     return refs
+
+
+def _finalize_panel(panel: dict) -> None:
+    """Ensure Lens state is complete and strip orphan ad-hoc data view refs."""
+    attrs = panel["embeddableConfig"]["attributes"]
+    state = _panel_state(panel)
+    _ensure_lens_defaults(state)
+    _complete_lns_metric_viz(attrs, state)
+    adhoc_ids = set((state.get("adHocDataViews") or {}).keys())
+    if adhoc_ids:
+        state["adHocDataViews"] = {}
+    attrs["references"] = [
+        ref
+        for ref in (attrs.get("references") or [])
+        if not (ref.get("type") == "index-pattern" and ref.get("id") in adhoc_ids)
+    ]
+    attrs["state"] = state
 
 
 def _rewrite_panel_refs(panel: dict, *, data_view_id: str = ELK_DV_ID) -> None:
@@ -761,6 +780,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     ]
 
     def add(panel: dict) -> None:
+        _finalize_panel(panel)
         panels.append(panel)
         dash_refs.extend(_dash_refs_for_panel(panel))
 
@@ -984,7 +1004,8 @@ def ensure_elk_cluster_monitoring_data_view(kb, auth: str) -> bool:
             print(f"  FAIL missing data view {ELK_DV_ID} after create", flush=True)
             return False
 
-    runtime_map = _runtime_map_for_view(ELK_DV_ID, dict(dv.get("runtimeFieldMap") or {}))
+    # Rebuild from ELK_RUNTIME_FIELDS only — drop stale fields (e.g. gauge-era score).
+    runtime_map = _runtime_map_for_view(ELK_DV_ID, {})
     runtime_map.update(ELK_RUNTIME_FIELDS)
     put = kibana_curl(
         kb,
