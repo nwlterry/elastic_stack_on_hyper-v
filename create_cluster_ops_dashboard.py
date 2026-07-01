@@ -14,25 +14,97 @@ from urllib.parse import quote
 
 from deploy_ordered_stack import NODES, connect, curl_elastic_auth, get_elastic_password, run
 from fix_dashboard_search import (
-    STACK_MONITORING_DATA_VIEW,
-    _data_view_path,
+    STACK_MONITORING_INDEX,
     _runtime_map_for_view,
-    ensure_stack_monitoring_data_view_id_matches_title,
     fix_monitoring_ui_creds,
     kibana_curl,
 )
+from monitoring_credentials import ensure_monitoring_user
+
+DASHBOARD_ID = "ism-cluster-operations-dashboard"
+DASHBOARD_TITLE = "[Elasticsearch] Cluster Operations Overview"
+FLEET_DASH_ID = "elasticsearch-b1399af0-628c-11ee-9c63-732d7f759a7a"
+
+ELK_DV_ID = "elk_cluster_monitoring"
+ELK_DV_NAME = "elk_cluster_monitoring"
+ELK_DV_TITLE = f"{STACK_MONITORING_INDEX},metrics-system.*"
+
+NODE_REGEX = r"ismelk.*\.ocplab\.net"
+ES_NODE_REGEX = r"ismelkesnode\d+\.ocplab\.net"
+SERVICE_PROCESS_REGEX = r".*(java|elasticsearch|kibana|elastic-agent).*"
 
 _UPTIME_DECOMPOSE_SCRIPT = (
     "long totalSec = doc['system.uptime.duration.ms'].value / 1000L; "
-    "long years = totalSec / 31536000L; totalSec = totalSec % 31536000L; "
-    "long months = totalSec / 2592000L; totalSec = totalSec % 2592000L; "
+    "totalSec = totalSec % 31536000L; "
+    "totalSec = totalSec % 2592000L; "
     "long days = totalSec / 86400L; totalSec = totalSec % 86400L; "
     "long hours = totalSec / 3600L; totalSec = totalSec % 3600L; "
     "long minutes = totalSec / 60L; "
     "long seconds = totalSec % 60L; "
 )
-SYSTEM_UPTIME_RUNTIME_FIELDS = {
-    "ism.uptime.duration.sec": {
+_PROCESS_UPTIME_DECOMPOSE_SCRIPT = (
+    "if (doc['process.cpu.start_time'].size() == 0) return; "
+    "long startMs = doc['process.cpu.start_time'].value.toInstant().toEpochMilli(); "
+    "long totalSec = (new Date().getTime() - startMs) / 1000L; "
+    "totalSec = totalSec % 31536000L; "
+    "totalSec = totalSec % 2592000L; "
+    "long days = totalSec / 86400L; totalSec = totalSec % 86400L; "
+    "long hours = totalSec / 3600L; totalSec = totalSec % 3600L; "
+    "long minutes = totalSec / 60L; "
+    "long seconds = totalSec % 60L; "
+)
+
+ELK_RUNTIME_FIELDS = {
+    "elk.node.disk.used.pct": {
+        "type": "double",
+        "script": {
+            "source": (
+                "if (doc['elasticsearch.node.stats.fs.total.total_in_bytes'].size() == 0 "
+                "|| doc['elasticsearch.node.stats.fs.total.available_in_bytes'].size() == 0) return; "
+                "double total = doc['elasticsearch.node.stats.fs.total.total_in_bytes'].value; "
+                "double avail = doc['elasticsearch.node.stats.fs.total.available_in_bytes'].value; "
+                "emit(Math.round((1.0 - avail / total) * 1000.0) / 10.0);"
+            )
+        },
+    },
+    "elk.node.disk.used.bytes": {
+        "type": "double",
+        "script": {
+            "source": (
+                "if (doc['elasticsearch.node.stats.fs.total.total_in_bytes'].size() == 0 "
+                "|| doc['elasticsearch.node.stats.fs.total.available_in_bytes'].size() == 0) return; "
+                "double total = doc['elasticsearch.node.stats.fs.total.total_in_bytes'].value; "
+                "double avail = doc['elasticsearch.node.stats.fs.total.available_in_bytes'].value; "
+                "emit(total - avail);"
+            )
+        },
+    },
+    "elk.shard.key": {
+        "type": "keyword",
+        "script": {
+            "source": (
+                "if (doc['elasticsearch.index.name'].size() == 0 "
+                "|| doc['elasticsearch.shard.number'].size() == 0) return; "
+                "String pri = doc['elasticsearch.shard.primary'].size() > 0 "
+                "? doc['elasticsearch.shard.primary'].value.toString() : '?'; "
+                "emit(doc['elasticsearch.index.name'].value + ':' + "
+                "doc['elasticsearch.shard.number'].value + ':' + pri);"
+            )
+        },
+    },
+    "elk.deployment.tier": {
+        "type": "keyword",
+        "script": {
+            "source": (
+                "if (doc['elasticsearch.node.name'].size() == 0) return; "
+                "String node = doc['elasticsearch.node.name'].value; "
+                "if (node.equals('ismelkesnode01.ocplab.net')) emit('master / warm'); "
+                "else if (node.equals('ismelkesnode02.ocplab.net')) emit('data_hot / ml'); "
+                "else if (node.equals('ismelkesnode03.ocplab.net')) emit('data_cold');"
+            )
+        },
+    },
+    "elk.uptime.duration.sec": {
         "type": "double",
         "script": {
             "source": (
@@ -52,80 +124,46 @@ SYSTEM_UPTIME_RUNTIME_FIELDS = {
             },
         }
         for field, part in [
-            ("ism.uptime.months", "months"),
-            ("ism.uptime.days", "days"),
-            ("ism.uptime.hours", "hours"),
-            ("ism.uptime.minutes", "minutes"),
-            ("ism.uptime.seconds", "seconds"),
+            ("elk.uptime.days", "days"),
+            ("elk.uptime.hours", "hours"),
+            ("elk.uptime.minutes", "minutes"),
+            ("elk.uptime.seconds", "seconds"),
+        ]
+    },
+    **{
+        field: {
+            "type": "long",
+            "script": {
+                "source": f"{_PROCESS_UPTIME_DECOMPOSE_SCRIPT}emit({part});"
+            },
+        }
+        for field, part in [
+            ("elk.service.uptime.days", "days"),
+            ("elk.service.uptime.hours", "hours"),
+            ("elk.service.uptime.minutes", "minutes"),
+            ("elk.service.uptime.seconds", "seconds"),
         ]
     },
 }
-CLUSTER_OPS_RUNTIME_FIELDS = {
-    "ism.node.disk.used.pct": {
-        "type": "double",
-        "script": {
-            "source": (
-                "if (doc['elasticsearch.node.stats.fs.total.total_in_bytes'].size() == 0 "
-                "|| doc['elasticsearch.node.stats.fs.total.available_in_bytes'].size() == 0) return; "
-                "double total = doc['elasticsearch.node.stats.fs.total.total_in_bytes'].value; "
-                "double avail = doc['elasticsearch.node.stats.fs.total.available_in_bytes'].value; "
-                "emit(Math.round((1.0 - avail / total) * 1000.0) / 10.0);"
-            )
-        },
-    },
-    "ism.node.disk.used.bytes": {
-        "type": "double",
-        "script": {
-            "source": (
-                "if (doc['elasticsearch.node.stats.fs.total.total_in_bytes'].size() == 0 "
-                "|| doc['elasticsearch.node.stats.fs.total.available_in_bytes'].size() == 0) return; "
-                "double total = doc['elasticsearch.node.stats.fs.total.total_in_bytes'].value; "
-                "double avail = doc['elasticsearch.node.stats.fs.total.available_in_bytes'].value; "
-                "emit(total - avail);"
-            )
-        },
-    },
-    "ism.shard.key": {
-        "type": "keyword",
-        "script": {
-            "source": (
-                "if (doc['elasticsearch.index.name'].size() == 0 "
-                "|| doc['elasticsearch.shard.number'].size() == 0) return; "
-                "String pri = doc['elasticsearch.shard.primary'].size() > 0 "
-                "? doc['elasticsearch.shard.primary'].value.toString() : '?'; "
-                "emit(doc['elasticsearch.index.name'].value + ':' + "
-                "doc['elasticsearch.shard.number'].value + ':' + pri);"
-            )
-        },
-    },
-    "ism.deployment.tier": {
-        "type": "keyword",
-        "script": {
-            "source": (
-                "if (doc['elasticsearch.node.name'].size() == 0) return; "
-                "String node = doc['elasticsearch.node.name'].value; "
-                "if (node.equals('ismelkesnode01.ocplab.net')) emit('master / warm'); "
-                "else if (node.equals('ismelkesnode02.ocplab.net')) emit('data_hot / ml'); "
-                "else if (node.equals('ismelkesnode03.ocplab.net')) emit('data_cold');"
-            )
-        },
-    },
-}
-from monitoring_credentials import ensure_monitoring_user
 
-DASHBOARD_ID = "ism-cluster-operations-dashboard"
-DASHBOARD_TITLE = "[Elasticsearch] Cluster Operations Overview"
-FLEET_DASH_ID = "elasticsearch-b1399af0-628c-11ee-9c63-732d7f759a7a"
-SM_DV = STACK_MONITORING_DATA_VIEW
-SYS_DV = "metrics-system.*"
-
-TIER_HOSTS = {
-    "master (es01)": "ismelkesnode01.ocplab.net",
-    "data_hot (es02)": "ismelkesnode02.ocplab.net",
-    "data_cold (es03)": "ismelkesnode03.ocplab.net",
-    "data_warm (es01)": "ismelkesnode01.ocplab.net",
-    "ml (es02)": "ismelkesnode02.ocplab.net",
-    "kibana": "ismelkkbnnode01.ocplab.net",
+CLUSTER_STATUS_PALETTE = {
+    "type": "palette",
+    "name": "status",
+    "params": {
+        "continuity": "above",
+        "maxSteps": 5,
+        "name": "status",
+        "progression": "fixed",
+        "rangeMax": None,
+        "rangeMin": None,
+        "rangeType": "categorical",
+        "reverse": False,
+        "stops": [
+            {"color": "#209280", "stop": "green"},
+            {"color": "#fec514", "stop": "yellow"},
+            {"color": "#bd271e", "stop": "red"},
+        ],
+    },
 }
 
 
@@ -190,54 +228,153 @@ def _dash_refs_for_panel(panel: dict) -> list[dict]:
     ]
 
 
-def _strip_metric_breakdown(state: dict) -> None:
-    layer_id, layer = _layer_bundle(state)
-    viz = state["visualization"]
-    terms_id = viz.pop("breakdownByAccessor", None)
-    if terms_id:
-        layer["columnOrder"] = [cid for cid in layer["columnOrder"] if cid != terms_id]
-        layer["columns"].pop(terms_id, None)
-    metric_id = viz["metricAccessor"]
-    layer["columnOrder"] = [metric_id]
-    viz.pop("collapseFn", None)
-    viz.pop("maxCols", None)
-    viz.pop("palette", None)
+def _rewrite_panel_refs(panel: dict) -> None:
+    attrs = panel["embeddableConfig"]["attributes"]
+    refs = attrs.get("references") or []
+    for ref in refs:
+        if ref.get("type") == "index-pattern":
+            ref["id"] = ELK_DV_ID
+    state = _panel_state(panel)
+    for flt in state.get("filters") or []:
+        meta = flt.get("meta") or {}
+        if meta.get("index") and meta["index"] != ELK_DV_ID:
+            meta["index"] = ELK_DV_ID
+        for param in meta.get("params") or []:
+            pmeta = param.get("meta") or {}
+            if pmeta.get("index"):
+                pmeta["index"] = ELK_DV_ID
+    attrs["state"] = state
 
 
-def _set_metric_field(
-    panel: dict,
+def _fleet_metricset_filter(metricset: str, filter_index: str) -> dict:
+    return {
+        "$state": {"store": "appState"},
+        "meta": {
+            "alias": None,
+            "disabled": False,
+            "index": filter_index,
+            "negate": False,
+            "type": "combined",
+            "relation": "OR",
+            "params": [
+                {
+                    "meta": {
+                        "alias": None,
+                        "disabled": False,
+                        "field": "metricset.name",
+                        "index": ELK_DV_ID,
+                        "key": "metricset.name",
+                        "negate": False,
+                        "params": {"query": metricset},
+                        "type": "phrase",
+                    },
+                    "query": {"match_phrase": {"metricset.name": metricset}},
+                },
+                {
+                    "meta": {
+                        "alias": None,
+                        "disabled": False,
+                        "field": "metricset.name",
+                        "index": ELK_DV_ID,
+                        "key": "metricset.name",
+                        "negate": True,
+                        "type": "exists",
+                        "value": "exists",
+                    },
+                    "query": {"exists": {"field": "metricset.name"}},
+                },
+            ],
+        },
+        "query": {},
+    }
+
+
+def _regex_terms_col(
+    col_id: str,
     *,
     label: str,
     field: str,
-    field_query: str,
-    data_type: str = "number",
-    format_id: str | None = None,
-    format_params: dict | None = None,
-    metricset: str = "cluster_stats",
-    metrics_only: bool = False,
-) -> None:
-    state = _panel_state(panel)
-    _, layer = _layer_bundle(state)
-    viz = state["visualization"]
-    metric_id = viz["metricAccessor"]
-    metric = layer["columns"][metric_id]
-    metric["label"] = label
-    metric["customLabel"] = True
-    metric["dataType"] = data_type
-    metric["sourceField"] = field
-    metric["scale"] = "ordinal" if data_type == "string" else "ratio"
-    metric["filter"] = {"language": "kuery", "query": field_query}
-    if format_id:
-        metric["params"]["format"] = {"id": format_id, "params": format_params or {}}
-    elif "format" in metric.get("params", {}):
-        metric["params"].pop("format", None)
+    pattern: str,
+    size: int = 10,
+    order_by: str | None = None,
+) -> dict:
+    return {
+        "customLabel": True,
+        "dataType": "string",
+        "isBucketed": True,
+        "label": label,
+        "operationType": "terms",
+        "params": {
+            "exclude": [],
+            "excludeIsRegex": False,
+            "include": [pattern],
+            "includeIsRegex": True,
+            "missingBucket": False,
+            "orderBy": {
+                "type": "column",
+                "columnId": order_by or col_id,
+            },
+            "orderDirection": "desc",
+            "otherBucket": False,
+            "parentFormat": {"id": "terms"},
+            "size": size,
+        },
+        "scale": "ordinal",
+        "sourceField": field,
+    }
 
-    if metrics_only:
-        _strip_metric_breakdown(state)
 
-    filter_ref = state["filters"][0]["meta"]["index"]
-    state["filters"] = [_fleet_metricset_filter(metricset, filter_ref)]
-    panel["embeddableConfig"]["attributes"]["state"] = state
+def _lv_col(
+    col_id: str,
+    label: str,
+    field: str,
+    *,
+    fmt: dict | None = None,
+    kql: str | None = None,
+) -> dict:
+    col = {
+        "customLabel": True,
+        "dataType": "number",
+        "filter": {"language": "kuery", "query": kql or f"{field}: *"},
+        "isBucketed": False,
+        "label": label,
+        "operationType": "last_value",
+        "params": {"sortField": "@timestamp"},
+        "scale": "ratio",
+        "sourceField": field,
+    }
+    if fmt:
+        col["params"]["format"] = fmt
+    return col
+
+
+def _uptime_metric_col(col_id: str, label: str, field: str, *, kql: str) -> dict:
+    return _lv_col(
+        col_id,
+        label,
+        field,
+        kql=kql,
+        fmt={"id": "number", "params": {"decimals": 0}},
+    )
+
+
+def _table_viz_columns(
+    specs: list[tuple[str, str]],
+    *,
+    left_align: set[str] | None = None,
+) -> list[dict]:
+    left = left_align or set()
+    cols = []
+    for col_id, _label in specs:
+        align = "left" if col_id in left else "right"
+        cols.append(
+            {
+                "columnId": col_id,
+                "alignment": align,
+                "headerAlignment": align,
+            }
+        )
+    return cols
 
 
 def _set_simple_metric(
@@ -252,8 +389,8 @@ def _set_simple_metric(
     format_params: dict | None = None,
     metricset: str = "cluster_stats",
     sort_field: str = "@timestamp",
+    status_palette: bool = False,
 ) -> None:
-    """Single-value metric panel matching the unassigned-shards Lens style."""
     state = _panel_state(panel)
     _, layer = _layer_bundle(state)
     viz = state["visualization"]
@@ -281,9 +418,16 @@ def _set_simple_metric(
     layer["columnOrder"] = [metric_id]
     viz.pop("collapseFn", None)
     viz.pop("maxCols", None)
+    if status_palette:
+        viz["palette"] = copy.deepcopy(CLUSTER_STATUS_PALETTE)
+        viz["colorMode"] = "background"
+    else:
+        viz.pop("palette", None)
+        viz.pop("colorMode", None)
     filter_ref = state["filters"][0]["meta"]["index"]
     state["filters"] = [_fleet_metricset_filter(metricset, filter_ref)]
     panel["embeddableConfig"]["attributes"]["state"] = state
+    _rewrite_panel_refs(panel)
 
 
 def _set_count_metric(
@@ -291,7 +435,7 @@ def _set_count_metric(
     *,
     label: str,
     kql: str,
-    field: str = "ism.shard.key",
+    field: str = "elk.shard.key",
     metricset: str = "shard",
 ) -> None:
     _set_simple_metric(
@@ -306,133 +450,6 @@ def _set_count_metric(
     )
 
 
-def _fleet_metricset_filter(metricset: str, filter_index: str) -> dict:
-    return {
-        "$state": {"store": "appState"},
-        "meta": {
-            "alias": None,
-            "disabled": False,
-            "index": filter_index,
-            "negate": False,
-            "type": "combined",
-            "relation": "OR",
-            "params": [
-                {
-                    "meta": {
-                        "alias": None,
-                        "disabled": False,
-                        "field": "metricset.name",
-                        "index": SM_DV,
-                        "key": "metricset.name",
-                        "negate": False,
-                        "params": {"query": metricset},
-                        "type": "phrase",
-                    },
-                    "query": {"match_phrase": {"metricset.name": metricset}},
-                },
-                {
-                    "meta": {
-                        "alias": None,
-                        "disabled": False,
-                        "field": "metricset.name",
-                        "index": SM_DV,
-                        "key": "metricset.name",
-                        "negate": True,
-                        "type": "exists",
-                        "value": "exists",
-                    },
-                    "query": {"exists": {"field": "metricset.name"}},
-                },
-            ],
-        },
-        "query": {},
-    }
-
-
-def _uptime_lv_col(col_id: str, label: str, field: str, *, host: str) -> dict:
-    return {
-        "customLabel": True,
-        "dataType": "number",
-        "filter": {
-            "language": "kuery",
-            "query": f'host.name : "{host}" and data_stream.dataset : "system.uptime"',
-        },
-        "isBucketed": False,
-        "label": label,
-        "operationType": "last_value",
-        "params": {
-            "sortField": "@timestamp",
-            "format": {"id": "number", "params": {"decimals": 0}},
-        },
-        "scale": "ratio",
-        "sourceField": field,
-    }
-
-
-def _set_uptime_table(panel: dict, *, host: str, tier: str) -> None:
-    title = f"System uptime — {host} ({tier})"
-    state = _panel_state(panel)
-    layer_id, _old_layer = _layer_bundle(state)
-    bucket_id = str(uuid.uuid4())
-    part_specs = [
-        ("Month", "ism.uptime.months"),
-        ("Day", "ism.uptime.days"),
-        ("Hour", "ism.uptime.hours"),
-        ("Minute", "ism.uptime.minutes"),
-        ("Second", "ism.uptime.seconds"),
-    ]
-    metric_ids = [str(uuid.uuid4()) for _ in part_specs]
-    cols: dict = {
-        bucket_id: {
-            "customLabel": True,
-            "dataType": "string",
-            "isBucketed": True,
-            "label": "Host",
-            "operationType": "terms",
-            "params": {
-                "exclude": [],
-                "excludeIsRegex": False,
-                "include": [host],
-                "includeIsRegex": False,
-                "missingBucket": False,
-                "orderBy": {"type": "column", "columnId": metric_ids[0]},
-                "orderDirection": "desc",
-                "otherBucket": False,
-                "parentFormat": {"id": "terms"},
-                "size": 1,
-            },
-            "scale": "ordinal",
-            "sourceField": "host.name",
-        }
-    }
-    column_order = [bucket_id]
-    viz_columns = [{"columnId": bucket_id}]
-    for (label, field), col_id in zip(part_specs, metric_ids, strict=True):
-        cols[col_id] = _uptime_lv_col(col_id, label, field, host=host)
-        column_order.append(col_id)
-        viz_columns.append({"columnId": col_id})
-
-    state["datasourceStates"]["formBased"]["layers"][layer_id] = {
-        "columnOrder": column_order,
-        "columns": cols,
-        "incompleteColumns": {},
-        "sampling": 0.1,
-    }
-    state["filters"] = []
-    state["visualization"] = {
-        "columns": viz_columns,
-        "layerId": layer_id,
-        "layerType": "data",
-    }
-    attrs = panel["embeddableConfig"]["attributes"]
-    attrs["title"] = title
-    attrs["state"] = state
-    attrs["references"] = [
-        {"id": SYS_DV, "name": f"indexpattern-datasource-layer-{layer_id}", "type": "index-pattern"},
-    ]
-    panel["title"] = title
-
-
 def _set_node_table(
     panel: dict,
     *,
@@ -440,6 +457,7 @@ def _set_node_table(
     metricset: str,
     bucket_field: str,
     bucket_label: str,
+    node_regex: str,
     metrics: list[dict],
     order_by_metric_id: str | None = None,
 ) -> None:
@@ -447,37 +465,18 @@ def _set_node_table(
     layer_id, _old_layer = _layer_bundle(state)
     bucket_id = str(uuid.uuid4())
     cols: dict = {
-        bucket_id: {
-            "customLabel": True,
-            "dataType": "string",
-            "isBucketed": True,
-            "label": bucket_label,
-            "operationType": "terms",
-            "params": {
-                "exclude": [],
-                "excludeIsRegex": False,
-                "include": [],
-                "includeIsRegex": False,
-                "missingBucket": False,
-                "orderBy": {
-                    "type": "column",
-                    "columnId": order_by_metric_id or metrics[0]["id"],
-                },
-                "orderDirection": "desc",
-                "otherBucket": False,
-                "parentFormat": {"id": "terms"},
-                "size": 10,
-            },
-            "scale": "ordinal",
-            "sourceField": bucket_field,
-        }
+        bucket_id: _regex_terms_col(
+            bucket_id,
+            label=bucket_label,
+            field=bucket_field,
+            pattern=node_regex,
+            order_by=order_by_metric_id or metrics[0]["id"],
+        )
     }
     column_order = [bucket_id]
-    viz_columns = [{"columnId": bucket_id}]
     for spec in metrics:
         cols[spec["id"]] = spec["column"]
         column_order.append(spec["id"])
-        viz_columns.append({"columnId": spec["id"]})
 
     state["datasourceStates"]["formBased"]["layers"][layer_id] = {
         "columnOrder": column_order,
@@ -488,7 +487,10 @@ def _set_node_table(
     filter_ref = state["filters"][0]["meta"]["index"]
     state["filters"] = [_fleet_metricset_filter(metricset, filter_ref)]
     state["visualization"] = {
-        "columns": viz_columns,
+        "columns": _table_viz_columns(
+            [(bucket_id, bucket_label), *[(s["id"], "") for s in metrics]],
+            left_align={bucket_id},
+        ),
         "layerId": layer_id,
         "layerType": "data",
     }
@@ -496,30 +498,131 @@ def _set_node_table(
     attrs["title"] = title
     attrs["state"] = state
     panel["title"] = title
+    _rewrite_panel_refs(panel)
 
 
-def _lv_col(col_id: str, label: str, field: str, *, fmt: dict | None = None) -> dict:
-    col = {
-        "customLabel": True,
-        "dataType": "number",
-        "filter": {"language": "kuery", "query": f"{field}: *"},
-        "isBucketed": False,
-        "label": label,
-        "operationType": "last_value",
-        "params": {"sortField": "@timestamp"},
-        "scale": "ratio",
-        "sourceField": field,
+def _set_server_uptime_table(panel: dict) -> None:
+    title = "Server uptime — all nodes"
+    state = _panel_state(panel)
+    layer_id, _old_layer = _layer_bundle(state)
+    node_id = str(uuid.uuid4())
+    part_specs = [
+        ("Day", "elk.uptime.days"),
+        ("Hour", "elk.uptime.hours"),
+        ("Minute", "elk.uptime.minutes"),
+        ("Second", "elk.uptime.seconds"),
+    ]
+    metric_ids = [str(uuid.uuid4()) for _ in part_specs]
+    uptime_kql = 'data_stream.dataset : "system.uptime"'
+    cols: dict = {
+        node_id: _regex_terms_col(
+            node_id,
+            label="Node",
+            field="host.name",
+            pattern=NODE_REGEX,
+            size=10,
+            order_by=metric_ids[0],
+        )
     }
-    if fmt:
-        col["params"]["format"] = fmt
-    return col
+    column_order = [node_id]
+    for (label, field), col_id in zip(part_specs, metric_ids, strict=True):
+        cols[col_id] = _uptime_metric_col(col_id, label, field, kql=uptime_kql)
+        column_order.append(col_id)
+
+    state["datasourceStates"]["formBased"]["layers"][layer_id] = {
+        "columnOrder": column_order,
+        "columns": cols,
+        "incompleteColumns": {},
+        "sampling": 0.1,
+    }
+    state["filters"] = []
+    state["visualization"] = {
+        "columns": _table_viz_columns(
+            [(node_id, "Node"), *zip(metric_ids, [p[0] for p in part_specs], strict=True)],
+            left_align={node_id},
+        ),
+        "layerId": layer_id,
+        "layerType": "data",
+    }
+    attrs = panel["embeddableConfig"]["attributes"]
+    attrs["title"] = title
+    attrs["state"] = state
+    panel["title"] = title
+    _rewrite_panel_refs(panel)
+
+
+def _set_service_uptime_table(panel: dict) -> None:
+    title = "Service uptime — all nodes"
+    state = _panel_state(panel)
+    layer_id, _old_layer = _layer_bundle(state)
+    node_id = str(uuid.uuid4())
+    service_id = str(uuid.uuid4())
+    part_specs = [
+        ("Day", "elk.service.uptime.days"),
+        ("Hour", "elk.service.uptime.hours"),
+        ("Minute", "elk.service.uptime.minutes"),
+        ("Second", "elk.service.uptime.seconds"),
+    ]
+    metric_ids = [str(uuid.uuid4()) for _ in part_specs]
+    service_kql = (
+        'data_stream.dataset : "system.process" and '
+        "(process.name : *java* or process.name : *elasticsearch* or "
+        "process.name : *kibana* or process.name : *elastic-agent*)"
+    )
+    cols: dict = {
+        node_id: _regex_terms_col(
+            node_id,
+            label="Node",
+            field="host.name",
+            pattern=NODE_REGEX,
+            size=10,
+            order_by=metric_ids[0],
+        ),
+        service_id: _regex_terms_col(
+            service_id,
+            label="Service",
+            field="process.name",
+            pattern=SERVICE_PROCESS_REGEX,
+            size=10,
+            order_by=metric_ids[0],
+        ),
+    }
+    column_order = [node_id, service_id]
+    for (label, field), col_id in zip(part_specs, metric_ids, strict=True):
+        cols[col_id] = _uptime_metric_col(col_id, label, field, kql=service_kql)
+        column_order.append(col_id)
+
+    state["datasourceStates"]["formBased"]["layers"][layer_id] = {
+        "columnOrder": column_order,
+        "columns": cols,
+        "incompleteColumns": {},
+        "sampling": 0.1,
+    }
+    state["filters"] = []
+    state["visualization"] = {
+        "columns": _table_viz_columns(
+            [
+                (node_id, "Node"),
+                (service_id, "Service"),
+                *zip(metric_ids, [p[0] for p in part_specs], strict=True),
+            ],
+            left_align={node_id, service_id},
+        ),
+        "layerId": layer_id,
+        "layerType": "data",
+    }
+    attrs = panel["embeddableConfig"]["attributes"]
+    attrs["title"] = title
+    attrs["state"] = state
+    panel["title"] = title
+    _rewrite_panel_refs(panel)
 
 
 def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     metric_tpl, table_tpl = _load_fleet_templates(kb, auth)
     panels: list[dict] = []
     dash_refs: list[dict] = [
-        {"id": SM_DV, "name": SM_DV, "type": "index-pattern"},
+        {"id": ELK_DV_ID, "name": ELK_DV_ID, "type": "index-pattern"},
     ]
 
     def add(panel: dict) -> None:
@@ -534,6 +637,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
                 "field": "elasticsearch.cluster.stats.status",
                 "kql": "elasticsearch.cluster.stats.status: *",
                 "data_type": "string",
+                "status_palette": True,
             },
         ),
         (
@@ -579,23 +683,20 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     )
     add(unassigned)
 
-    y0 = 8
-    uptime_h = 7
-    uptime_cols = 3
-    for i, (tier, host) in enumerate(TIER_HOSTS.items()):
-        p = _clone_panel(
-            table_tpl,
-            f"System uptime — {host} ({tier})",
-            x=(i % uptime_cols) * 16,
-            y=y0 + (i // uptime_cols) * uptime_h,
-            w=16,
-            h=uptime_h,
-        )
-        _set_uptime_table(p, host=host, tier=tier)
-        add(p)
+    y_uptime = 8
+    server_uptime = _clone_panel(
+        table_tpl, "Server uptime — all nodes", x=0, y=y_uptime, w=24, h=12
+    )
+    _set_server_uptime_table(server_uptime)
+    add(server_uptime)
 
-    uptime_rows = (len(TIER_HOSTS) + uptime_cols - 1) // uptime_cols
-    bottom_y = y0 + uptime_rows * uptime_h
+    service_uptime = _clone_panel(
+        table_tpl, "Service uptime — all nodes", x=24, y=y_uptime, w=24, h=12
+    )
+    _set_service_uptime_table(service_uptime)
+    add(service_uptime)
+
+    bottom_y = y_uptime + 12
     total_id, used_id, avail_id, pct_id = (
         str(uuid.uuid4()),
         str(uuid.uuid4()),
@@ -609,6 +710,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
         metricset="node_stats",
         bucket_field="elasticsearch.node.name",
         bucket_label="Node",
+        node_regex=ES_NODE_REGEX,
         metrics=[
             {
                 "id": total_id,
@@ -624,7 +726,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
                 "column": _lv_col(
                     used_id,
                     "Disk used",
-                    "ism.node.disk.used.bytes",
+                    "elk.node.disk.used.bytes",
                     fmt={"id": "bytes", "params": {"decimals": 1}},
                 ),
             },
@@ -642,7 +744,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
                 "column": _lv_col(
                     pct_id,
                     "Disk used %",
-                    "ism.node.disk.used.pct",
+                    "elk.node.disk.used.pct",
                     fmt={"id": "number", "params": {"decimals": 1, "suffix": "%"}},
                 ),
             },
@@ -659,6 +761,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
         metricset="node_stats",
         bucket_field="elasticsearch.node.name",
         bucket_label="Node",
+        node_regex=ES_NODE_REGEX,
         metrics=[
             {
                 "id": jvm_used_id,
@@ -695,8 +798,9 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     attributes = {
         "title": DASHBOARD_TITLE,
         "description": (
-            "Cluster health from Fleet stack monitoring. "
-            "Tier mapping: es01=warm/master, es02=hot/ml, es03=cold, kbn01=kibana."
+            "Cluster health from Fleet stack monitoring and system metrics "
+            f"(data view {ELK_DV_NAME}). Tier mapping: es01=warm/master, "
+            "es02=hot/ml, es03=cold, kbn01=kibana."
         ),
         "timeRestore": True,
         "timeFrom": "now-24h",
@@ -722,15 +826,37 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     return attributes, dash_refs
 
 
-def ensure_cluster_ops_runtime_fields(kb, auth: str) -> bool:
-    view_path = _data_view_path(SM_DV)
+def ensure_elk_cluster_monitoring_data_view(kb, auth: str) -> bool:
+    view_path = _data_view_path(ELK_DV_ID)
     resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{view_path}")
     dv = resp.get("data_view")
     if not dv:
-        print(f"  FAIL missing data view {SM_DV}", flush=True)
-        return False
-    runtime_map = _runtime_map_for_view(SM_DV, dict(dv.get("runtimeFieldMap") or {}))
-    runtime_map.update(CLUSTER_OPS_RUNTIME_FIELDS)
+        create = kibana_curl(
+            kb,
+            auth,
+            "POST",
+            f"/api/saved_objects/index-pattern/{view_path}",
+            {
+                "attributes": {
+                    "title": ELK_DV_TITLE,
+                    "name": ELK_DV_NAME,
+                    "timeFieldName": "@timestamp",
+                    "runtimeFieldMap": json.dumps({}),
+                    "allowNoIndex": True,
+                }
+            },
+        )
+        if create.get("statusCode", 200) >= 400:
+            print(f"  FAIL create {ELK_DV_ID}: {create.get('message', create)[:200]}", flush=True)
+            return False
+        resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{view_path}")
+        dv = resp.get("data_view")
+        if not dv:
+            print(f"  FAIL missing data view {ELK_DV_ID} after create", flush=True)
+            return False
+
+    runtime_map = _runtime_map_for_view(ELK_DV_ID, dict(dv.get("runtimeFieldMap") or {}))
+    runtime_map.update(ELK_RUNTIME_FIELDS)
     put = kibana_curl(
         kb,
         auth,
@@ -738,8 +864,8 @@ def ensure_cluster_ops_runtime_fields(kb, auth: str) -> bool:
         f"/api/data_views/data_view/{view_path}",
         {
             "data_view": {
-                "title": dv["title"],
-                "name": dv.get("name"),
+                "title": ELK_DV_TITLE,
+                "name": ELK_DV_NAME,
                 "timeFieldName": dv.get("timeFieldName", "@timestamp"),
                 "runtimeFieldMap": runtime_map,
                 "allowNoIndex": True,
@@ -749,59 +875,8 @@ def ensure_cluster_ops_runtime_fields(kb, auth: str) -> bool:
     if put.get("statusCode", 200) >= 400:
         print(f"  FAIL runtime fields: {put.get('message', put)[:200]}", flush=True)
         return False
-    print(f"  OK runtime fields {list(CLUSTER_OPS_RUNTIME_FIELDS)}", flush=True)
-    return True
-
-
-def ensure_system_metrics_data_view(kb, auth: str) -> bool:
-    dv_id = SYS_DV
-    view_path = _data_view_path(dv_id)
-    resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{view_path}")
-    dv = resp.get("data_view")
-    if not dv:
-        attrs = {
-            "title": dv_id,
-            "timeFieldName": "@timestamp",
-            "runtimeFieldMap": json.dumps({}),
-            "allowNoIndex": True,
-        }
-        create = kibana_curl(
-            kb,
-            auth,
-            "POST",
-            f"/api/saved_objects/index-pattern/{view_path}",
-            {"attributes": attrs},
-        )
-        if create.get("statusCode", 200) >= 400:
-            print(f"  FAIL create {dv_id}: {create.get('message', create)[:200]}", flush=True)
-            return False
-        resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{view_path}")
-        dv = resp.get("data_view")
-        if not dv:
-            print(f"  FAIL missing data view {dv_id} after create", flush=True)
-            return False
-
-    runtime_map = _runtime_map_for_view(dv_id, dict(dv.get("runtimeFieldMap") or {}))
-    runtime_map.update(SYSTEM_UPTIME_RUNTIME_FIELDS)
-    put = kibana_curl(
-        kb,
-        auth,
-        "POST",
-        f"/api/data_views/data_view/{view_path}",
-        {
-            "data_view": {
-                "title": dv["title"],
-                "name": dv.get("name"),
-                "timeFieldName": dv.get("timeFieldName", "@timestamp"),
-                "runtimeFieldMap": runtime_map,
-                "allowNoIndex": True,
-            }
-        },
-    )
-    if put.get("statusCode", 200) >= 400:
-        print(f"  FAIL system runtime fields: {put.get('message', put)[:200]}", flush=True)
-        return False
-    print(f"  OK runtime fields {list(SYSTEM_UPTIME_RUNTIME_FIELDS)} on {dv_id}", flush=True)
+    print(f"  OK data view {ELK_DV_NAME} ({ELK_DV_ID})", flush=True)
+    print(f"  OK runtime fields {list(ELK_RUNTIME_FIELDS)}", flush=True)
     return True
 
 
@@ -815,12 +890,7 @@ def main() -> int:
     fix_monitoring_ui_creds(kb, mon_pwd)
 
     print("=== Ensure data views ===", flush=True)
-    ensure_stack_monitoring_data_view_id_matches_title(kb, auth)
-    if not ensure_cluster_ops_runtime_fields(kb, auth):
-        kb.close()
-        es.close()
-        return 1
-    if not ensure_system_metrics_data_view(kb, auth):
+    if not ensure_elk_cluster_monitoring_data_view(kb, auth):
         kb.close()
         es.close()
         return 1
