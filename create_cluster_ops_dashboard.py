@@ -31,7 +31,9 @@ ELK_DV_TITLE = f"{STACK_MONITORING_INDEX},metrics-system.*"
 
 NODE_REGEX = r"ismelk.*\.ocplab\.net"
 ES_NODE_REGEX = r"ismelkesnode\d+\.ocplab\.net"
-SERVICE_PROCESS_REGEX = r".*(java|elasticsearch|kibana|elastic-agent).*"
+ELK_SERVICE_NAMES = ("elasticsearch", "kibana", "logstash")
+
+_DEFAULT_METRIC_PALETTE = {"name": "default", "type": "palette"}
 
 _UPTIME_DECOMPOSE_SCRIPT = (
     "long totalSec = doc['system.uptime.duration.ms'].value / 1000L; "
@@ -113,6 +115,18 @@ ELK_RUNTIME_FIELDS = {
             )
         },
     },
+    "elk.service.name": {
+        "type": "keyword",
+        "script": {
+            "source": (
+                "if (doc['system.process.cgroup.cpu.id'].size() == 0) return; "
+                "String id = doc['system.process.cgroup.cpu.id'].value; "
+                "if (id.equals('elasticsearch.service')) emit('elasticsearch'); "
+                "else if (id.equals('kibana.service')) emit('kibana'); "
+                "else if (id.equals('logstash.service')) emit('logstash');"
+            )
+        },
+    },
     **{
         field: {
             "type": "long",
@@ -134,7 +148,13 @@ ELK_RUNTIME_FIELDS = {
         field: {
             "type": "long",
             "script": {
-                "source": f"{_PROCESS_UPTIME_DECOMPOSE_SCRIPT}emit({part});"
+                "source": (
+                    "if (doc['system.process.cgroup.cpu.id'].size() == 0) return; "
+                    "String id = doc['system.process.cgroup.cpu.id'].value; "
+                    "if (!id.equals('elasticsearch.service') && !id.equals('kibana.service') "
+                    "&& !id.equals('logstash.service')) return; "
+                    f"{_PROCESS_UPTIME_DECOMPOSE_SCRIPT}emit({part});"
+                )
             },
         }
         for field, part in [
@@ -298,6 +318,38 @@ def _fleet_metricset_filter(metricset: str, filter_index: str) -> dict:
     }
 
 
+def _service_terms_col(
+    col_id: str,
+    *,
+    label: str,
+    order_by: str | None = None,
+) -> dict:
+    return {
+        "customLabel": True,
+        "dataType": "string",
+        "isBucketed": True,
+        "label": label,
+        "operationType": "terms",
+        "params": {
+            "exclude": [],
+            "excludeIsRegex": False,
+            "include": list(ELK_SERVICE_NAMES),
+            "includeIsRegex": False,
+            "missingBucket": False,
+            "orderBy": {
+                "type": "column",
+                "columnId": order_by or col_id,
+            },
+            "orderDirection": "desc",
+            "otherBucket": False,
+            "parentFormat": {"id": "terms"},
+            "size": len(ELK_SERVICE_NAMES),
+        },
+        "scale": "ordinal",
+        "sourceField": "elk.service.name",
+    }
+
+
 def _regex_terms_col(
     col_id: str,
     *,
@@ -426,8 +478,9 @@ def _set_simple_metric(
     layer["columnOrder"] = [metric_id]
     viz.pop("collapseFn", None)
     viz.pop("maxCols", None)
-    viz.pop("palette", None)
     viz.pop("colorMode", None)
+    viz["showBar"] = False
+    viz["palette"] = copy.deepcopy(_DEFAULT_METRIC_PALETTE)
     filter_ref = state["filters"][0]["meta"]["index"]
     state["filters"] = [_fleet_metricset_filter(metricset, filter_ref)]
     panel["embeddableConfig"]["attributes"]["state"] = state
@@ -642,8 +695,8 @@ def _set_service_uptime_table(panel: dict) -> None:
     metric_ids = [str(uuid.uuid4()) for _ in part_specs]
     service_kql = (
         'data_stream.dataset : "system.process" and '
-        "(process.name : *java* or process.name : *elasticsearch* or "
-        "process.name : *kibana* or process.name : *elastic-agent*)"
+        '(elk.service.name : "elasticsearch" or elk.service.name : "kibana" '
+        'or elk.service.name : "logstash")'
     )
     cols: dict = {
         node_id: _regex_terms_col(
@@ -654,12 +707,9 @@ def _set_service_uptime_table(panel: dict) -> None:
             size=10,
             order_by=metric_ids[0],
         ),
-        service_id: _regex_terms_col(
+        service_id: _service_terms_col(
             service_id,
             label="Service",
-            field="process.name",
-            pattern=SERVICE_PROCESS_REGEX,
-            size=10,
             order_by=metric_ids[0],
         ),
     }
