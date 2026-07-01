@@ -255,14 +255,23 @@ def _clone_panel(template: dict, title: str, *, x: int, y: int, w: int, h: int) 
 
 def _dash_refs_for_panel(panel: dict) -> list[dict]:
     panel_id = panel["panelIndex"]
-    return [
-        {
-            "id": ref["id"],
-            "name": f"{panel_id}:{ref['name']}",
-            "type": ref["type"],
-        }
-        for ref in panel["embeddableConfig"]["attributes"].get("references", [])
-    ]
+    attrs = panel["embeddableConfig"]["attributes"]
+    state_raw = attrs.get("state", {})
+    state = state_raw if isinstance(state_raw, dict) else json.loads(state_raw)
+    adhoc_ids = set((state.get("adHocDataViews") or {}).keys())
+    refs = []
+    for ref in attrs.get("references", []):
+        # Ad-hoc data views live in panel state only — never promote to dashboard refs.
+        if ref.get("type") == "index-pattern" and ref.get("id") in adhoc_ids:
+            continue
+        refs.append(
+            {
+                "id": ref["id"],
+                "name": f"{panel_id}:{ref['name']}",
+                "type": ref["type"],
+            }
+        )
+    return refs
 
 
 def _rewrite_panel_refs(panel: dict, *, data_view_id: str = ELK_DV_ID) -> None:
@@ -634,7 +643,6 @@ def _set_cluster_status_gauge(panel: dict) -> None:
     title = "Cluster status"
     state = _panel_state(panel)
     layer_id, _old_layer = _layer_bundle(state)
-    adhoc_id = str(uuid.uuid4())
     metric_id = str(uuid.uuid4())
     min_id = str(uuid.uuid4())
     max_id = str(uuid.uuid4())
@@ -659,24 +667,14 @@ def _set_cluster_status_gauge(panel: dict) -> None:
         min_id: _static_value_col(min_id, label="Minimum", value=0),
         max_id: _static_value_col(max_id, label="Maximum", value=100),
     }
-    state["adHocDataViews"] = {
-        adhoc_id: {
-            "id": adhoc_id,
-            "title": ELK_DV_TITLE,
-            "name": "cluster_status_gauge",
-            "timeFieldName": "@timestamp",
-            "runtimeFieldMap": {
-                "elk.cluster.status.score": ELK_RUNTIME_FIELDS["elk.cluster.status.score"],
-            },
-        }
-    }
     state["datasourceStates"]["formBased"]["layers"][layer_id] = {
         "columnOrder": [metric_id, min_id, max_id],
         "columns": cols,
         "incompleteColumns": {},
         "sampling": 0.1,
     }
-    state["filters"] = [_fleet_metricset_filter("cluster_stats", adhoc_id)]
+    filter_ref = state["filters"][0]["meta"]["index"]
+    state["filters"] = [_fleet_metricset_filter("cluster_stats", filter_ref)]
     state.pop("headerRowHeight", None)
     state["visualization"] = {
         "colorMode": "palette",
@@ -695,7 +693,7 @@ def _set_cluster_status_gauge(panel: dict) -> None:
     attrs["visualizationType"] = "lnsGauge"
     attrs["state"] = state
     panel["title"] = title
-    _rewrite_panel_refs(panel, data_view_id=adhoc_id)
+    _rewrite_panel_refs(panel)
 
 
 def _set_service_uptime_table(panel: dict) -> None:
