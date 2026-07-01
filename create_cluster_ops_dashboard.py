@@ -27,9 +27,13 @@ DASHBOARD_ID = "ism-cluster-operations-dashboard"
 DASHBOARD_TITLE = "[Elasticsearch] Cluster Operations Overview"
 FLEET_DASH_ID = "elasticsearch-b1399af0-628c-11ee-9c63-732d7f759a7a"
 
-ELK_DV_ID = "elk_cluster_monitoring"
-ELK_DV_NAME = "elk_cluster_monitoring"
-ELK_DV_TITLE = f"{STACK_MONITORING_INDEX},metrics-system.*"
+ELK_MONITORING_DV_ID = "elk_cluster_monitoring"
+ELK_MONITORING_DV_NAME = "elk_cluster_monitoring"
+ELK_MONITORING_DV_TITLE = STACK_MONITORING_INDEX
+
+ELK_SYSTEMS_DV_ID = "elk_cluster_systems"
+ELK_SYSTEMS_DV_NAME = "elk_cluster_systems"
+ELK_SYSTEMS_DV_TITLE = "metrics-system.*"
 
 NODE_REGEX = r"ismelk.*\.ocplab\.net"
 ES_NODE_REGEX = r"ismelkesnode\d+\.ocplab\.net"
@@ -58,7 +62,24 @@ _PROCESS_UPTIME_DECOMPOSE_SCRIPT = (
     "long seconds = totalSec % 60L; "
 )
 
-ELK_RUNTIME_FIELDS = {
+_NODE_ROLE_FROM_ES = (
+    "if (doc['elasticsearch.node.name'].size() == 0) return; "
+    "String node = doc['elasticsearch.node.name'].value; "
+    "if (node.equals('ismelkesnode01.ocplab.net')) emit('master, data_warm'); "
+    "else if (node.equals('ismelkesnode02.ocplab.net')) emit('data_hot, ml'); "
+    "else if (node.equals('ismelkesnode03.ocplab.net')) emit('data_cold');"
+)
+_NODE_ROLE_FROM_HOST = (
+    "if (doc['host.name'].size() == 0) return; "
+    "String node = doc['host.name'].value; "
+    "if (node.equals('ismelkesnode01.ocplab.net')) emit('master, data_warm'); "
+    "else if (node.equals('ismelkesnode02.ocplab.net')) emit('data_hot, ml'); "
+    "else if (node.equals('ismelkesnode03.ocplab.net')) emit('data_cold'); "
+    "else if (node.equals('ismelkkbnnode01.ocplab.net')) emit('kibana'); "
+    "else if (node.equals('ismelkflnode01.ocplab.net')) emit('fleet');"
+)
+
+ELK_MONITORING_RUNTIME_FIELDS = {
     "elk.node.disk.used.pct": {
         "type": "double",
         "script": {
@@ -110,22 +131,23 @@ ELK_RUNTIME_FIELDS = {
     },
     "elk.node.role": {
         "type": "keyword",
+        "script": {"source": _NODE_ROLE_FROM_ES},
+    },
+}
+
+ELK_SYSTEM_RUNTIME_FIELDS = {
+    "elk.cluster.node.name": {
+        "type": "keyword",
         "script": {
             "source": (
-                "String node = null; "
-                "if (doc.containsKey('elasticsearch.node.name') "
-                "&& doc['elasticsearch.node.name'].size() > 0) "
-                "node = doc['elasticsearch.node.name'].value; "
-                "else if (doc.containsKey('host.name') && doc['host.name'].size() > 0) "
-                "node = doc['host.name'].value; "
-                "if (node == null) return; "
-                "if (node.equals('ismelkesnode01.ocplab.net')) emit('master, data_warm'); "
-                "else if (node.equals('ismelkesnode02.ocplab.net')) emit('data_hot, ml'); "
-                "else if (node.equals('ismelkesnode03.ocplab.net')) emit('data_cold'); "
-                "else if (node.equals('ismelkkbnnode01.ocplab.net')) emit('kibana'); "
-                "else if (node.equals('ismelkflnode01.ocplab.net')) emit('fleet');"
+                "if (doc['host.name'].size() == 0) return; "
+                "emit(doc['host.name'].value);"
             )
         },
+    },
+    "elk.node.role": {
+        "type": "keyword",
+        "script": {"source": _NODE_ROLE_FROM_HOST},
     },
     "elk.uptime.duration.sec": {
         "type": "double",
@@ -304,7 +326,7 @@ def _finalize_panel(panel: dict) -> None:
     attrs["state"] = state
 
 
-def _rewrite_panel_refs(panel: dict, *, data_view_id: str = ELK_DV_ID) -> None:
+def _rewrite_panel_refs(panel: dict, *, data_view_id: str = ELK_MONITORING_DV_ID) -> None:
     attrs = panel["embeddableConfig"]["attributes"]
     refs = attrs.get("references") or []
     for ref in refs:
@@ -338,7 +360,7 @@ def _fleet_metricset_filter(metricset: str, filter_index: str) -> dict:
                         "alias": None,
                         "disabled": False,
                         "field": "metricset.name",
-                        "index": ELK_DV_ID,
+                        "index": filter_index,
                         "key": "metricset.name",
                         "negate": False,
                         "params": {"query": metricset},
@@ -351,7 +373,7 @@ def _fleet_metricset_filter(metricset: str, filter_index: str) -> dict:
                         "alias": None,
                         "disabled": False,
                         "field": "metricset.name",
-                        "index": ELK_DV_ID,
+                        "index": filter_index,
                         "key": "metricset.name",
                         "negate": True,
                         "type": "exists",
@@ -522,6 +544,7 @@ def _set_simple_metric(
     format_params: dict | None = None,
     metricset: str = "cluster_stats",
     sort_field: str = "@timestamp",
+    data_view_id: str = ELK_MONITORING_DV_ID,
 ) -> None:
     state = _panel_state(panel)
     _, layer = _layer_bundle(state)
@@ -554,9 +577,9 @@ def _set_simple_metric(
     viz["showBar"] = False
     viz["palette"] = copy.deepcopy(_DEFAULT_METRIC_PALETTE)
     filter_ref = state["filters"][0]["meta"]["index"]
-    state["filters"] = [_fleet_metricset_filter(metricset, filter_ref)]
+    state["filters"] = [_fleet_metricset_filter(metricset, data_view_id)]
     panel["embeddableConfig"]["attributes"]["state"] = state
-    _rewrite_panel_refs(panel)
+    _rewrite_panel_refs(panel, data_view_id=data_view_id)
 
 
 def _set_count_metric(
@@ -566,6 +589,7 @@ def _set_count_metric(
     kql: str,
     field: str = "elk.shard.key",
     metricset: str = "shard",
+    data_view_id: str = ELK_MONITORING_DV_ID,
 ) -> None:
     _set_simple_metric(
         panel,
@@ -576,6 +600,7 @@ def _set_count_metric(
         format_id="number",
         format_params={"decimals": 0},
         metricset=metricset,
+        data_view_id=data_view_id,
     )
 
 
@@ -589,6 +614,7 @@ def _set_node_table(
     node_regex: str,
     metrics: list[dict],
     order_by_metric_id: str | None = None,
+    data_view_id: str = ELK_MONITORING_DV_ID,
 ) -> None:
     state = _panel_state(panel)
     layer_id, _old_layer = _layer_bundle(state)
@@ -615,8 +641,7 @@ def _set_node_table(
         "incompleteColumns": {},
         "sampling": 0.1,
     }
-    filter_ref = state["filters"][0]["meta"]["index"]
-    state["filters"] = [_fleet_metricset_filter(metricset, filter_ref)]
+    state["filters"] = [_fleet_metricset_filter(metricset, data_view_id)]
     state["visualization"] = {
         "columns": _table_viz_columns(
             [(bucket_id, bucket_label), (role_id, "Role"), *[(s["id"], "") for s in metrics]],
@@ -629,7 +654,7 @@ def _set_node_table(
     attrs["title"] = title
     attrs["state"] = state
     panel["title"] = title
-    _rewrite_panel_refs(panel)
+    _rewrite_panel_refs(panel, data_view_id=data_view_id)
 
 
 def _set_server_uptime_table(panel: dict) -> None:
@@ -650,7 +675,7 @@ def _set_server_uptime_table(panel: dict) -> None:
         node_id: _regex_terms_col(
             node_id,
             label="Node",
-            field="host.name",
+            field="elk.cluster.node.name",
             pattern=NODE_REGEX,
             size=10,
             order_by=metric_ids[0],
@@ -685,7 +710,7 @@ def _set_server_uptime_table(panel: dict) -> None:
     attrs["title"] = title
     attrs["state"] = state
     panel["title"] = title
-    _rewrite_panel_refs(panel)
+    _rewrite_panel_refs(panel, data_view_id=ELK_SYSTEMS_DV_ID)
 
 
 def _set_cluster_status_table(panel: dict) -> None:
@@ -737,8 +762,7 @@ def _set_cluster_status_table(panel: dict) -> None:
         "incompleteColumns": {},
         "sampling": 0.1,
     }
-    filter_ref = state["filters"][0]["meta"]["index"]
-    state["filters"] = [_fleet_metricset_filter("cluster_stats", filter_ref)]
+    state["filters"] = [_fleet_metricset_filter("cluster_stats", ELK_MONITORING_DV_ID)]
     state["headerRowHeight"] = "hide"
     state["visualization"] = {
         "columns": [
@@ -783,7 +807,7 @@ def _set_service_uptime_table(panel: dict) -> None:
         node_id: _regex_terms_col(
             node_id,
             label="Node",
-            field="host.name",
+            field="elk.cluster.node.name",
             pattern=NODE_REGEX,
             size=10,
             order_by=metric_ids[0],
@@ -824,14 +848,15 @@ def _set_service_uptime_table(panel: dict) -> None:
     attrs["title"] = title
     attrs["state"] = state
     panel["title"] = title
-    _rewrite_panel_refs(panel)
+    _rewrite_panel_refs(panel, data_view_id=ELK_SYSTEMS_DV_ID)
 
 
 def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     metric_tpl, table_tpl = _load_fleet_templates(kb, auth)
     panels: list[dict] = []
     dash_refs: list[dict] = [
-        {"id": ELK_DV_ID, "name": ELK_DV_ID, "type": "index-pattern"},
+        {"id": ELK_MONITORING_DV_ID, "name": ELK_MONITORING_DV_ID, "type": "index-pattern"},
+        {"id": ELK_SYSTEMS_DV_ID, "name": ELK_SYSTEMS_DV_ID, "type": "index-pattern"},
     ]
 
     def add(panel: dict) -> None:
@@ -1002,8 +1027,9 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     attributes = {
         "title": DASHBOARD_TITLE,
         "description": (
-            "Cluster health from Fleet stack monitoring and system metrics "
-            f"(data view {ELK_DV_NAME}). Tier mapping: es01=warm/master, "
+            "Cluster health from Fleet stack monitoring "
+            f"({ELK_MONITORING_DV_NAME}) and system metrics "
+            f"({ELK_SYSTEMS_DV_NAME}). Tier mapping: es01=warm/master, "
             "es02=hot/ml, es03=cold, kbn01=kibana."
         ),
         "timeRestore": True,
@@ -1030,8 +1056,16 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     return attributes, dash_refs
 
 
-def ensure_elk_cluster_monitoring_data_view(kb, auth: str) -> bool:
-    view_path = _data_view_path(ELK_DV_ID)
+def _ensure_elk_data_view(
+    kb,
+    auth: str,
+    *,
+    dv_id: str,
+    dv_name: str,
+    dv_title: str,
+    runtime_fields: dict,
+) -> bool:
+    view_path = _data_view_path(dv_id)
     resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{view_path}")
     dv = resp.get("data_view")
     if not dv:
@@ -1042,8 +1076,8 @@ def ensure_elk_cluster_monitoring_data_view(kb, auth: str) -> bool:
             f"/api/saved_objects/index-pattern/{view_path}",
             {
                 "attributes": {
-                    "title": ELK_DV_TITLE,
-                    "name": ELK_DV_NAME,
+                    "title": dv_title,
+                    "name": dv_name,
                     "timeFieldName": "@timestamp",
                     "runtimeFieldMap": json.dumps({}),
                     "allowNoIndex": True,
@@ -1051,17 +1085,16 @@ def ensure_elk_cluster_monitoring_data_view(kb, auth: str) -> bool:
             },
         )
         if create.get("statusCode", 200) >= 400:
-            print(f"  FAIL create {ELK_DV_ID}: {create.get('message', create)[:200]}", flush=True)
+            print(f"  FAIL create {dv_id}: {create.get('message', create)[:200]}", flush=True)
             return False
         resp = kibana_curl(kb, auth, "GET", f"/api/data_views/data_view/{view_path}")
         dv = resp.get("data_view")
         if not dv:
-            print(f"  FAIL missing data view {ELK_DV_ID} after create", flush=True)
+            print(f"  FAIL missing data view {dv_id} after create", flush=True)
             return False
 
-    # Rebuild from ELK_RUNTIME_FIELDS only — drop stale fields (e.g. gauge-era score).
-    runtime_map = _runtime_map_for_view(ELK_DV_ID, {})
-    runtime_map.update(ELK_RUNTIME_FIELDS)
+    runtime_map = _runtime_map_for_view(dv_id, {})
+    runtime_map.update(runtime_fields)
     put = kibana_curl(
         kb,
         auth,
@@ -1069,8 +1102,8 @@ def ensure_elk_cluster_monitoring_data_view(kb, auth: str) -> bool:
         f"/api/data_views/data_view/{view_path}",
         {
             "data_view": {
-                "title": ELK_DV_TITLE,
-                "name": ELK_DV_NAME,
+                "title": dv_title,
+                "name": dv_name,
                 "timeFieldName": dv.get("timeFieldName", "@timestamp"),
                 "runtimeFieldMap": runtime_map,
                 "allowNoIndex": True,
@@ -1078,11 +1111,33 @@ def ensure_elk_cluster_monitoring_data_view(kb, auth: str) -> bool:
         },
     )
     if put.get("statusCode", 200) >= 400:
-        print(f"  FAIL runtime fields: {put.get('message', put)[:200]}", flush=True)
+        print(f"  FAIL runtime fields on {dv_id}: {put.get('message', put)[:200]}", flush=True)
         return False
-    print(f"  OK data view {ELK_DV_NAME} ({ELK_DV_ID})", flush=True)
-    print(f"  OK runtime fields {list(ELK_RUNTIME_FIELDS)}", flush=True)
+    print(f"  OK data view {dv_name} ({dv_id})", flush=True)
+    print(f"  OK runtime fields {list(runtime_fields)}", flush=True)
     return True
+
+
+def ensure_elk_cluster_monitoring_data_view(kb, auth: str) -> bool:
+    return _ensure_elk_data_view(
+        kb,
+        auth,
+        dv_id=ELK_MONITORING_DV_ID,
+        dv_name=ELK_MONITORING_DV_NAME,
+        dv_title=ELK_MONITORING_DV_TITLE,
+        runtime_fields=ELK_MONITORING_RUNTIME_FIELDS,
+    )
+
+
+def ensure_elk_cluster_systems_data_view(kb, auth: str) -> bool:
+    return _ensure_elk_data_view(
+        kb,
+        auth,
+        dv_id=ELK_SYSTEMS_DV_ID,
+        dv_name=ELK_SYSTEMS_DV_NAME,
+        dv_title=ELK_SYSTEMS_DV_TITLE,
+        runtime_fields=ELK_SYSTEM_RUNTIME_FIELDS,
+    )
 
 
 def main() -> int:
@@ -1096,6 +1151,10 @@ def main() -> int:
 
     print("=== Ensure data views ===", flush=True)
     if not ensure_elk_cluster_monitoring_data_view(kb, auth):
+        kb.close()
+        es.close()
+        return 1
+    if not ensure_elk_cluster_systems_data_view(kb, auth):
         kb.close()
         es.close()
         return 1
