@@ -62,21 +62,29 @@ _PROCESS_UPTIME_DECOMPOSE_SCRIPT = (
     "long seconds = totalSec % 60L; "
 )
 
+def _has(field: str) -> str:
+    return f"doc.containsKey('{field}') && doc['{field}'].size() > 0"
+
+
+def _missing(field: str) -> str:
+    return f"(!doc.containsKey('{field}') || doc['{field}'].size() == 0)"
+
+
 _NODE_ROLE_FROM_ES = (
-    "if (doc['elasticsearch.node.name'].size() == 0) return; "
+    f"if ({_has('elasticsearch.node.name')}) {{ "
     "String node = doc['elasticsearch.node.name'].value; "
     "if (node.equals('ismelkesnode01.ocplab.net')) emit('master, data_warm'); "
     "else if (node.equals('ismelkesnode02.ocplab.net')) emit('data_hot, ml'); "
-    "else if (node.equals('ismelkesnode03.ocplab.net')) emit('data_cold');"
+    "else if (node.equals('ismelkesnode03.ocplab.net')) emit('data_cold'); }"
 )
 _NODE_ROLE_FROM_HOST = (
-    "if (doc['host.name'].size() == 0) return; "
+    f"if ({_has('host.name')}) {{ "
     "String node = doc['host.name'].value; "
     "if (node.equals('ismelkesnode01.ocplab.net')) emit('master, data_warm'); "
     "else if (node.equals('ismelkesnode02.ocplab.net')) emit('data_hot, ml'); "
     "else if (node.equals('ismelkesnode03.ocplab.net')) emit('data_cold'); "
     "else if (node.equals('ismelkkbnnode01.ocplab.net')) emit('kibana'); "
-    "else if (node.equals('ismelkflnode01.ocplab.net')) emit('fleet');"
+    "else if (node.equals('ismelkflnode01.ocplab.net')) emit('fleet'); }"
 )
 
 ELK_MONITORING_RUNTIME_FIELDS = {
@@ -84,8 +92,8 @@ ELK_MONITORING_RUNTIME_FIELDS = {
         "type": "double",
         "script": {
             "source": (
-                "if (doc['elasticsearch.node.stats.fs.total.total_in_bytes'].size() == 0 "
-                "|| doc['elasticsearch.node.stats.fs.total.available_in_bytes'].size() == 0) return; "
+                f"if ({_missing('elasticsearch.node.stats.fs.total.total_in_bytes')} "
+                f"|| {_missing('elasticsearch.node.stats.fs.total.available_in_bytes')}) return; "
                 "double total = doc['elasticsearch.node.stats.fs.total.total_in_bytes'].value; "
                 "double avail = doc['elasticsearch.node.stats.fs.total.available_in_bytes'].value; "
                 "emit(Math.round((1.0 - avail / total) * 1000.0) / 10.0);"
@@ -96,8 +104,8 @@ ELK_MONITORING_RUNTIME_FIELDS = {
         "type": "double",
         "script": {
             "source": (
-                "if (doc['elasticsearch.node.stats.fs.total.total_in_bytes'].size() == 0 "
-                "|| doc['elasticsearch.node.stats.fs.total.available_in_bytes'].size() == 0) return; "
+                f"if ({_missing('elasticsearch.node.stats.fs.total.total_in_bytes')} "
+                f"|| {_missing('elasticsearch.node.stats.fs.total.available_in_bytes')}) return; "
                 "double total = doc['elasticsearch.node.stats.fs.total.total_in_bytes'].value; "
                 "double avail = doc['elasticsearch.node.stats.fs.total.available_in_bytes'].value; "
                 "emit(total - avail);"
@@ -108,9 +116,8 @@ ELK_MONITORING_RUNTIME_FIELDS = {
         "type": "keyword",
         "script": {
             "source": (
-                "if (doc['elasticsearch.index.name'].size() == 0 "
-                "|| doc['elasticsearch.shard.number'].size() == 0) return; "
-                "String pri = doc['elasticsearch.shard.primary'].size() > 0 "
+                f"if ({_missing('elasticsearch.index.name')} || {_missing('elasticsearch.shard.number')}) return; "
+                f"String pri = {_has('elasticsearch.shard.primary')} "
                 "? doc['elasticsearch.shard.primary'].value.toString() : '?'; "
                 "emit(doc['elasticsearch.index.name'].value + ':' + "
                 "doc['elasticsearch.shard.number'].value + ':' + pri);"
@@ -121,11 +128,11 @@ ELK_MONITORING_RUNTIME_FIELDS = {
         "type": "keyword",
         "script": {
             "source": (
-                "if (doc['elasticsearch.node.name'].size() == 0) return; "
+                f"if ({_has('elasticsearch.node.name')}) {{ "
                 "String node = doc['elasticsearch.node.name'].value; "
                 "if (node.equals('ismelkesnode01.ocplab.net')) emit('master / warm'); "
                 "else if (node.equals('ismelkesnode02.ocplab.net')) emit('data_hot / ml'); "
-                "else if (node.equals('ismelkesnode03.ocplab.net')) emit('data_cold');"
+                "else if (node.equals('ismelkesnode03.ocplab.net')) emit('data_cold'); }"
             )
         },
     },
@@ -140,8 +147,7 @@ ELK_SYSTEM_RUNTIME_FIELDS = {
         "type": "keyword",
         "script": {
             "source": (
-                "if (doc['host.name'].size() == 0) return; "
-                "emit(doc['host.name'].value);"
+                f"if ({_has('host.name')}) emit(doc['host.name'].value);"
             )
         },
     },
@@ -1095,6 +1101,8 @@ def _ensure_elk_data_view(
 
     runtime_map = _runtime_map_for_view(dv_id, {})
     runtime_map.update(runtime_fields)
+    # Native @timestamp on Fleet/system metrics; runtime field causes ES 9 cyclic dependency.
+    runtime_map.pop("@timestamp", None)
     put = kibana_curl(
         kb,
         auth,
