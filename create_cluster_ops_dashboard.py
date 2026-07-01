@@ -108,6 +108,25 @@ ELK_RUNTIME_FIELDS = {
             )
         },
     },
+    "elk.node.role": {
+        "type": "keyword",
+        "script": {
+            "source": (
+                "String node = null; "
+                "if (doc.containsKey('elasticsearch.node.name') "
+                "&& doc['elasticsearch.node.name'].size() > 0) "
+                "node = doc['elasticsearch.node.name'].value; "
+                "else if (doc.containsKey('host.name') && doc['host.name'].size() > 0) "
+                "node = doc['host.name'].value; "
+                "if (node == null) return; "
+                "if (node.equals('ismelkesnode01.ocplab.net')) emit('master, data_warm'); "
+                "else if (node.equals('ismelkesnode02.ocplab.net')) emit('data_hot, ml'); "
+                "else if (node.equals('ismelkesnode03.ocplab.net')) emit('data_cold'); "
+                "else if (node.equals('ismelkkbnnode01.ocplab.net')) emit('kibana'); "
+                "else if (node.equals('ismelkflnode01.ocplab.net')) emit('fleet');"
+            )
+        },
+    },
     "elk.uptime.duration.sec": {
         "type": "double",
         "script": {
@@ -447,6 +466,31 @@ def _uptime_metric_col(col_id: str, label: str, field: str, *, kql: str) -> dict
     )
 
 
+def _role_terms_col(col_id: str, *, order_by: str) -> dict:
+    """Terms bucket — last_value/top_metrics cannot aggregate runtime keyword fields."""
+    return {
+        "customLabel": True,
+        "dataType": "string",
+        "isBucketed": True,
+        "label": "Role",
+        "operationType": "terms",
+        "params": {
+            "exclude": [],
+            "excludeIsRegex": False,
+            "include": [],
+            "includeIsRegex": False,
+            "missingBucket": False,
+            "orderBy": {"type": "column", "columnId": order_by},
+            "orderDirection": "desc",
+            "otherBucket": False,
+            "parentFormat": {"id": "terms"},
+            "size": 1,
+        },
+        "scale": "ordinal",
+        "sourceField": "elk.node.role",
+    }
+
+
 def _table_viz_columns(
     specs: list[tuple[str, str]],
     *,
@@ -549,6 +593,7 @@ def _set_node_table(
     state = _panel_state(panel)
     layer_id, _old_layer = _layer_bundle(state)
     bucket_id = str(uuid.uuid4())
+    role_id = str(uuid.uuid4())
     cols: dict = {
         bucket_id: _regex_terms_col(
             bucket_id,
@@ -556,9 +601,10 @@ def _set_node_table(
             field=bucket_field,
             pattern=node_regex,
             order_by=order_by_metric_id or metrics[0]["id"],
-        )
+        ),
+        role_id: _role_terms_col(role_id, order_by=order_by_metric_id or metrics[0]["id"]),
     }
-    column_order = [bucket_id]
+    column_order = [bucket_id, role_id]
     for spec in metrics:
         cols[spec["id"]] = spec["column"]
         column_order.append(spec["id"])
@@ -573,8 +619,8 @@ def _set_node_table(
     state["filters"] = [_fleet_metricset_filter(metricset, filter_ref)]
     state["visualization"] = {
         "columns": _table_viz_columns(
-            [(bucket_id, bucket_label), *[(s["id"], "") for s in metrics]],
-            left_align={bucket_id},
+            [(bucket_id, bucket_label), (role_id, "Role"), *[(s["id"], "") for s in metrics]],
+            left_align={bucket_id, role_id},
         ),
         "layerId": layer_id,
         "layerType": "data",
@@ -591,6 +637,7 @@ def _set_server_uptime_table(panel: dict) -> None:
     state = _panel_state(panel)
     layer_id, _old_layer = _layer_bundle(state)
     node_id = str(uuid.uuid4())
+    role_id = str(uuid.uuid4())
     part_specs = [
         ("Day", "elk.uptime.days"),
         ("Hour", "elk.uptime.hours"),
@@ -607,9 +654,10 @@ def _set_server_uptime_table(panel: dict) -> None:
             pattern=NODE_REGEX,
             size=10,
             order_by=metric_ids[0],
-        )
+        ),
+        role_id: _role_terms_col(role_id, order_by=metric_ids[0]),
     }
-    column_order = [node_id]
+    column_order = [node_id, role_id]
     for (label, field), col_id in zip(part_specs, metric_ids, strict=True):
         cols[col_id] = _uptime_metric_col(col_id, label, field, kql=uptime_kql)
         column_order.append(col_id)
@@ -623,8 +671,12 @@ def _set_server_uptime_table(panel: dict) -> None:
     state["filters"] = []
     state["visualization"] = {
         "columns": _table_viz_columns(
-            [(node_id, "Node"), *zip(metric_ids, [p[0] for p in part_specs], strict=True)],
-            left_align={node_id},
+            [
+                (node_id, "Node"),
+                (role_id, "Role"),
+                *zip(metric_ids, [p[0] for p in part_specs], strict=True),
+            ],
+            left_align={node_id, role_id},
         ),
         "layerId": layer_id,
         "layerType": "data",
@@ -713,6 +765,7 @@ def _set_service_uptime_table(panel: dict) -> None:
     state = _panel_state(panel)
     layer_id, _old_layer = _layer_bundle(state)
     node_id = str(uuid.uuid4())
+    role_id = str(uuid.uuid4())
     service_id = str(uuid.uuid4())
     part_specs = [
         ("Day", "elk.service.uptime.days"),
@@ -735,13 +788,14 @@ def _set_service_uptime_table(panel: dict) -> None:
             size=10,
             order_by=metric_ids[0],
         ),
+        role_id: _role_terms_col(role_id, order_by=metric_ids[0]),
         service_id: _service_terms_col(
             service_id,
             label="Service",
             order_by=metric_ids[0],
         ),
     }
-    column_order = [node_id, service_id]
+    column_order = [node_id, role_id, service_id]
     for (label, field), col_id in zip(part_specs, metric_ids, strict=True):
         cols[col_id] = _uptime_metric_col(col_id, label, field, kql=service_kql)
         column_order.append(col_id)
@@ -757,10 +811,11 @@ def _set_service_uptime_table(panel: dict) -> None:
         "columns": _table_viz_columns(
             [
                 (node_id, "Node"),
+                (role_id, "Role"),
                 (service_id, "Service"),
                 *zip(metric_ids, [p[0] for p in part_specs], strict=True),
             ],
-            left_align={node_id, service_id},
+            left_align={node_id, role_id, service_id},
         ),
         "layerId": layer_id,
         "layerType": "data",
