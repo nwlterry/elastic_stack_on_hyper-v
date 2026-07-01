@@ -146,24 +146,33 @@ ELK_RUNTIME_FIELDS = {
     },
 }
 
-CLUSTER_STATUS_PALETTE = {
-    "type": "palette",
-    "name": "status",
-    "params": {
-        "continuity": "above",
-        "maxSteps": 5,
-        "name": "status",
-        "progression": "fixed",
-        "rangeMax": None,
-        "rangeMin": None,
-        "rangeType": "categorical",
-        "reverse": False,
-        "stops": [
-            {"color": "#209280", "stop": "green"},
-            {"color": "#fec514", "stop": "yellow"},
-            {"color": "#bd271e", "stop": "red"},
-        ],
-    },
+CLUSTER_STATUS_COLOR_MAPPING = {
+    "assignments": [
+        {
+            "rule": {"type": "matchExactly", "values": ["green"]},
+            "color": {"type": "colorCode", "colorCode": "#209280"},
+            "touched": True,
+        },
+        {
+            "rule": {"type": "matchExactly", "values": ["yellow"]},
+            "color": {"type": "colorCode", "colorCode": "#fec514"},
+            "touched": True,
+        },
+        {
+            "rule": {"type": "matchExactly", "values": ["red"]},
+            "color": {"type": "colorCode", "colorCode": "#bd271e"},
+            "touched": True,
+        },
+    ],
+    "specialAssignments": [
+        {
+            "rule": {"type": "other"},
+            "color": {"type": "loop"},
+            "touched": False,
+        }
+    ],
+    "paletteId": "eui_amsterdam_color_blind",
+    "colorMode": {"type": "categorical"},
 }
 
 
@@ -389,7 +398,6 @@ def _set_simple_metric(
     format_params: dict | None = None,
     metricset: str = "cluster_stats",
     sort_field: str = "@timestamp",
-    status_palette: bool = False,
 ) -> None:
     state = _panel_state(panel)
     _, layer = _layer_bundle(state)
@@ -418,12 +426,8 @@ def _set_simple_metric(
     layer["columnOrder"] = [metric_id]
     viz.pop("collapseFn", None)
     viz.pop("maxCols", None)
-    if status_palette:
-        viz["palette"] = copy.deepcopy(CLUSTER_STATUS_PALETTE)
-        viz["colorMode"] = "background"
-    else:
-        viz.pop("palette", None)
-        viz.pop("colorMode", None)
+    viz.pop("palette", None)
+    viz.pop("colorMode", None)
     filter_ref = state["filters"][0]["meta"]["index"]
     state["filters"] = [_fleet_metricset_filter(metricset, filter_ref)]
     panel["embeddableConfig"]["attributes"]["state"] = state
@@ -551,6 +555,78 @@ def _set_server_uptime_table(panel: dict) -> None:
     _rewrite_panel_refs(panel)
 
 
+def _set_cluster_status_table(panel: dict) -> None:
+    """Colored status cell — Lens metrics only palette-color numeric values."""
+    title = "Cluster status"
+    state = _panel_state(panel)
+    layer_id, _old_layer = _layer_bundle(state)
+    status_id = str(uuid.uuid4())
+    count_id = str(uuid.uuid4())
+    status_kql = "elasticsearch.cluster.stats.status: *"
+    cols: dict = {
+        status_id: {
+            "customLabel": True,
+            "dataType": "string",
+            "filter": {"language": "kuery", "query": status_kql},
+            "isBucketed": True,
+            "label": "Status",
+            "operationType": "terms",
+            "params": {
+                "exclude": [],
+                "excludeIsRegex": False,
+                "include": [],
+                "includeIsRegex": False,
+                "missingBucket": False,
+                "orderBy": {"type": "column", "columnId": count_id},
+                "orderDirection": "desc",
+                "otherBucket": False,
+                "parentFormat": {"id": "terms"},
+                "size": 1,
+            },
+            "scale": "ordinal",
+            "sourceField": "elasticsearch.cluster.stats.status",
+        },
+        count_id: {
+            "customLabel": True,
+            "dataType": "number",
+            "filter": {"language": "kuery", "query": status_kql},
+            "isBucketed": False,
+            "label": "Count",
+            "operationType": "count",
+            "params": {"emptyAsNull": True},
+            "scale": "ratio",
+            "sourceField": "___records___",
+        },
+    }
+    state["datasourceStates"]["formBased"]["layers"][layer_id] = {
+        "columnOrder": [status_id, count_id],
+        "columns": cols,
+        "incompleteColumns": {},
+        "sampling": 0.1,
+    }
+    filter_ref = state["filters"][0]["meta"]["index"]
+    state["filters"] = [_fleet_metricset_filter("cluster_stats", filter_ref)]
+    state["headerRowHeight"] = "hide"
+    state["visualization"] = {
+        "columns": [
+            {
+                "columnId": status_id,
+                "alignment": "center",
+                "colorMode": "cell",
+                "colorMapping": copy.deepcopy(CLUSTER_STATUS_COLOR_MAPPING),
+            },
+            {"columnId": count_id, "hidden": True},
+        ],
+        "layerId": layer_id,
+        "layerType": "data",
+    }
+    attrs = panel["embeddableConfig"]["attributes"]
+    attrs["title"] = title
+    attrs["state"] = state
+    panel["title"] = title
+    _rewrite_panel_refs(panel)
+
+
 def _set_service_uptime_table(panel: dict) -> None:
     title = "Service uptime — all nodes"
     state = _panel_state(panel)
@@ -629,17 +705,11 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
         panels.append(panel)
         dash_refs.extend(_dash_refs_for_panel(panel))
 
+    cluster_status = _clone_panel(table_tpl, "Cluster status", x=0, y=0, w=12, h=8)
+    _set_cluster_status_table(cluster_status)
+    add(cluster_status)
+
     kpis = [
-        (
-            "Cluster status",
-            {
-                "label": "Cluster status",
-                "field": "elasticsearch.cluster.stats.status",
-                "kql": "elasticsearch.cluster.stats.status: *",
-                "data_type": "string",
-                "status_palette": True,
-            },
-        ),
         (
             "Index count",
             {
@@ -661,7 +731,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
             },
         ),
     ]
-    for i, (title, spec) in enumerate(kpis):
+    for i, (title, spec) in enumerate(kpis, start=1):
         p = _clone_panel(metric_tpl, title, x=i * 12, y=0, w=12, h=8)
         _set_simple_metric(
             p,
