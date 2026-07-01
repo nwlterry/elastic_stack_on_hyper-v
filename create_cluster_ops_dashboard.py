@@ -115,6 +115,18 @@ ELK_RUNTIME_FIELDS = {
             )
         },
     },
+    "elk.cluster.status.score": {
+        "type": "double",
+        "script": {
+            "source": (
+                "if (doc['elasticsearch.cluster.stats.status'].size() == 0) return; "
+                "String status = doc['elasticsearch.cluster.stats.status'].value; "
+                "if (status.equals('green')) emit(100.0); "
+                "else if (status.equals('yellow')) emit(50.0); "
+                "else if (status.equals('red')) emit(0.0);"
+            )
+        },
+    },
     "elk.service.name": {
         "type": "keyword",
         "script": {
@@ -166,33 +178,29 @@ ELK_RUNTIME_FIELDS = {
     },
 }
 
-CLUSTER_STATUS_COLOR_MAPPING = {
-    "assignments": [
-        {
-            "rule": {"type": "matchExactly", "values": ["green"]},
-            "color": {"type": "colorCode", "colorCode": "#209280"},
-            "touched": True,
-        },
-        {
-            "rule": {"type": "matchExactly", "values": ["yellow"]},
-            "color": {"type": "colorCode", "colorCode": "#fec514"},
-            "touched": True,
-        },
-        {
-            "rule": {"type": "matchExactly", "values": ["red"]},
-            "color": {"type": "colorCode", "colorCode": "#bd271e"},
-            "touched": True,
-        },
-    ],
-    "specialAssignments": [
-        {
-            "rule": {"type": "other"},
-            "color": {"type": "loop"},
-            "touched": False,
-        }
-    ],
-    "paletteId": "eui_amsterdam_color_blind",
-    "colorMode": {"type": "categorical"},
+CLUSTER_STATUS_GAUGE_PALETTE = {
+    "name": "custom",
+    "type": "palette",
+    "params": {
+        "name": "custom",
+        "reverse": False,
+        "rangeType": "number",
+        "rangeMin": 0,
+        "rangeMax": 100,
+        "continuity": "none",
+        "gradient": False,
+        "steps": 3,
+        "stops": [
+            {"color": "#bd271e", "stop": 0},
+            {"color": "#fec514", "stop": 50},
+            {"color": "#209280", "stop": 100},
+        ],
+        "colorStops": [
+            {"color": "#bd271e", "stop": 0},
+            {"color": "#fec514", "stop": 50},
+            {"color": "#209280", "stop": 100},
+        ],
+    },
 }
 
 
@@ -257,21 +265,21 @@ def _dash_refs_for_panel(panel: dict) -> list[dict]:
     ]
 
 
-def _rewrite_panel_refs(panel: dict) -> None:
+def _rewrite_panel_refs(panel: dict, *, data_view_id: str = ELK_DV_ID) -> None:
     attrs = panel["embeddableConfig"]["attributes"]
     refs = attrs.get("references") or []
     for ref in refs:
         if ref.get("type") == "index-pattern":
-            ref["id"] = ELK_DV_ID
+            ref["id"] = data_view_id
     state = _panel_state(panel)
     for flt in state.get("filters") or []:
         meta = flt.get("meta") or {}
-        if meta.get("index") and meta["index"] != ELK_DV_ID:
-            meta["index"] = ELK_DV_ID
+        if meta.get("index") and meta["index"] != data_view_id:
+            meta["index"] = data_view_id
         for param in meta.get("params") or []:
             pmeta = param.get("meta") or {}
             if pmeta.get("index"):
-                pmeta["index"] = ELK_DV_ID
+                pmeta["index"] = data_view_id
     attrs["state"] = state
 
 
@@ -608,76 +616,86 @@ def _set_server_uptime_table(panel: dict) -> None:
     _rewrite_panel_refs(panel)
 
 
-def _set_cluster_status_table(panel: dict) -> None:
-    """Colored status cell — Lens metrics only palette-color numeric values."""
+def _static_value_col(col_id: str, *, label: str, value: int | float) -> dict:
+    return {
+        "customLabel": True,
+        "dataType": "number",
+        "isBucketed": False,
+        "isStaticValue": True,
+        "label": label,
+        "operationType": "static_value",
+        "params": {"value": str(value)},
+        "scale": "ratio",
+    }
+
+
+def _set_cluster_status_gauge(panel: dict) -> None:
+    """Traffic-light gauge: green=100, yellow=50, red=0."""
     title = "Cluster status"
     state = _panel_state(panel)
     layer_id, _old_layer = _layer_bundle(state)
-    status_id = str(uuid.uuid4())
-    count_id = str(uuid.uuid4())
-    status_kql = "elasticsearch.cluster.stats.status: *"
+    adhoc_id = str(uuid.uuid4())
+    metric_id = str(uuid.uuid4())
+    min_id = str(uuid.uuid4())
+    max_id = str(uuid.uuid4())
     cols: dict = {
-        status_id: {
-            "customLabel": True,
-            "dataType": "string",
-            "filter": {"language": "kuery", "query": status_kql},
-            "isBucketed": True,
-            "label": "Status",
-            "operationType": "terms",
-            "params": {
-                "exclude": [],
-                "excludeIsRegex": False,
-                "include": [],
-                "includeIsRegex": False,
-                "missingBucket": False,
-                "orderBy": {"type": "column", "columnId": count_id},
-                "orderDirection": "desc",
-                "otherBucket": False,
-                "parentFormat": {"id": "terms"},
-                "size": 1,
-            },
-            "scale": "ordinal",
-            "sourceField": "elasticsearch.cluster.stats.status",
-        },
-        count_id: {
+        metric_id: {
             "customLabel": True,
             "dataType": "number",
-            "filter": {"language": "kuery", "query": status_kql},
+            "filter": {
+                "language": "kuery",
+                "query": "elasticsearch.cluster.stats.status: *",
+            },
             "isBucketed": False,
-            "label": "Count",
-            "operationType": "count",
-            "params": {"emptyAsNull": True},
+            "label": "Cluster status",
+            "operationType": "max",
+            "params": {
+                "emptyAsNull": True,
+                "format": {"id": "number", "params": {"decimals": 0}},
+            },
             "scale": "ratio",
-            "sourceField": "___records___",
+            "sourceField": "elk.cluster.status.score",
         },
+        min_id: _static_value_col(min_id, label="Minimum", value=0),
+        max_id: _static_value_col(max_id, label="Maximum", value=100),
+    }
+    state["adHocDataViews"] = {
+        adhoc_id: {
+            "id": adhoc_id,
+            "title": ELK_DV_TITLE,
+            "name": "cluster_status_gauge",
+            "timeFieldName": "@timestamp",
+            "runtimeFieldMap": {
+                "elk.cluster.status.score": ELK_RUNTIME_FIELDS["elk.cluster.status.score"],
+            },
+        }
     }
     state["datasourceStates"]["formBased"]["layers"][layer_id] = {
-        "columnOrder": [status_id, count_id],
+        "columnOrder": [metric_id, min_id, max_id],
         "columns": cols,
         "incompleteColumns": {},
         "sampling": 0.1,
     }
-    filter_ref = state["filters"][0]["meta"]["index"]
-    state["filters"] = [_fleet_metricset_filter("cluster_stats", filter_ref)]
-    state["headerRowHeight"] = "hide"
+    state["filters"] = [_fleet_metricset_filter("cluster_stats", adhoc_id)]
+    state.pop("headerRowHeight", None)
     state["visualization"] = {
-        "columns": [
-            {
-                "columnId": status_id,
-                "alignment": "center",
-                "colorMode": "cell",
-                "colorMapping": copy.deepcopy(CLUSTER_STATUS_COLOR_MAPPING),
-            },
-            {"columnId": count_id, "hidden": True},
-        ],
+        "colorMode": "palette",
+        "labelMajorMode": "auto",
         "layerId": layer_id,
         "layerType": "data",
+        "maxAccessor": max_id,
+        "metricAccessor": metric_id,
+        "minAccessor": min_id,
+        "palette": copy.deepcopy(CLUSTER_STATUS_GAUGE_PALETTE),
+        "shape": "semiCircle",
+        "ticksPosition": "bands",
     }
     attrs = panel["embeddableConfig"]["attributes"]
     attrs["title"] = title
+    attrs["visualizationType"] = "lnsGauge"
     attrs["state"] = state
     panel["title"] = title
-    _rewrite_panel_refs(panel)
+    _rewrite_panel_refs(panel, data_view_id=adhoc_id)
 
 
 def _set_service_uptime_table(panel: dict) -> None:
@@ -755,8 +773,8 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
         panels.append(panel)
         dash_refs.extend(_dash_refs_for_panel(panel))
 
-    cluster_status = _clone_panel(table_tpl, "Cluster status", x=0, y=0, w=12, h=8)
-    _set_cluster_status_table(cluster_status)
+    cluster_status = _clone_panel(metric_tpl, "Cluster status", x=0, y=0, w=12, h=10)
+    _set_cluster_status_gauge(cluster_status)
     add(cluster_status)
 
     kpis = [
@@ -803,7 +821,7 @@ def build_dashboard(kb, auth: str) -> tuple[dict, list[dict]]:
     )
     add(unassigned)
 
-    y_uptime = 8
+    y_uptime = 10
     server_uptime = _clone_panel(
         table_tpl, "Server uptime — all nodes", x=0, y=y_uptime, w=24, h=12
     )
