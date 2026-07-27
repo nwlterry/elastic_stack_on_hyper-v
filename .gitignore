@@ -27,3 +27,16 @@ Thumbs.db
 # Logs
 *.log
 cluster_review_issues.txt
+
+# Local one-shot debug helpers (not production runbooks)
+_dbg_*.py
+_q*.py
+_dump_*.py
+_test_*.py
+_probe_*.py
+_lens_dump.txt
+_es04_yml_out.txt
+
+# Screenshot / ad-hoc captures
+*.png
+!docs/**/*.png

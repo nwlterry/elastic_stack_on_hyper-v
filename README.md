@@ -66,6 +66,20 @@ python run_with_pass.py fleet_ps.py
 python run_with_pass.py verify_kibana.py
 ```
 
+## Lab ops (8.18.4 / 8.19.18, Hyper-V, APM, rejoin)
+
+See **[docs/LAB_OPS_8_18_8_19.md](docs/LAB_OPS_8_18_8_19.md)** and **[DEPLOYMENT_STATUS.md](DEPLOYMENT_STATUS.md)** for the July 2026 procedures:
+
+| Goal | Command |
+|------|---------|
+| Rolling ES upgrade → **8.19.18** | `python upgrade_es_to_8_19_18.py` |
+| Hyper-V checkpoint / restore ES nodes | `Checkpoint-EsNodes.ps1`, `Restore-EsNodes-To-Snap.ps1` |
+| Downgrade path (wipe + NFS snapshot restore) | `scripts/downgrade-es-node-8184.sh`, `complete_downgrade_restore.py` |
+| Reduce yellow in mixed-version cluster | `python fix_yellow_mixed_version.py` |
+| APM Server + sample Obs/APM alerts | `deploy_apm_finish.py`, `create_obs_apm_alerts_and_snaps.py` |
+
+**Note:** A mixed 8.18.4 + 8.19.x cluster stays yellow on system-index replicas until versions align. All primaries assigned is expected after `fix_yellow_mixed_version.py`.
+
 ## Upgrade procedures
 
 ### Download upgrade packages (once)
@@ -74,7 +88,7 @@ python run_with_pass.py verify_kibana.py
 python download_upgrade_packages.py
 ```
 
-Downloads Elasticsearch/Kibana RPMs and agent archives for **8.19.9** and **9.4.1** into `packages/`.
+Downloads Elasticsearch/Kibana RPMs and agent archives for **8.19.9** / **8.19.18** and **9.4.1** into `packages/`.
 
 ### Create pre-upgrade checkpoints (all 5 VMs)
 
@@ -159,6 +173,12 @@ Fleet and agents trust the ES auto-configured CA via `scripts/elastic-agent-ca.s
 | `Snapshot-ElasticVMs.ps1` | Create Hyper-V checkpoints on all 5 VMs |
 | `Restore-ElasticVMs.ps1` | Restore all 5 VMs from a named checkpoint |
 | `upgrade_elastic_stack.py` | Full stack rolling upgrade to 9.4.1 |
+| `upgrade_es_to_8_19_18.py` | Timed rolling ES upgrade to 8.19.18 |
+| `fix_yellow_mixed_version.py` | Clear non-system unassigned replicas (mixed version) |
+| `complete_downgrade_restore.py` | 8.18.4 RPM reinstall + snapshot restore lab path |
+| `deploy_apm_finish.py` | Standalone APM Server on Fleet host |
+| `create_obs_apm_alerts_and_snaps.py` | Sample Obs/APM rules + ES/HV snaps |
+| `Checkpoint-EsNodes.ps1` / `Restore-EsNodes-To-Snap.ps1` | Hyper-V ES node snap / restore |
 | `upgrade_es_only.py` | Restore snapshots + ES-only upgrade |
 | `rollback_upgrade_fleet.py` | Fleet artifact rollback/upgrade (primary) |
 | `rollback_reinstall_fleet.py` | Fleet rollback via direct reinstall (fallback) |

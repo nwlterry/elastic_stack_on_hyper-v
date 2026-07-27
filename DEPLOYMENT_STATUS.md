@@ -1,19 +1,21 @@
-# Deployment Status — ism-elk-cluster (2026-06-30)
+# Deployment Status — ism-elk-cluster (2026-07-27)
 
 ## Stack overview
 
 | Component | FQDN | IP | Status |
 |-----------|------|-----|--------|
-| Elasticsearch ×3 | ismelkesnode01–03.ocplab.net | 10.44.40.31–33 | Green, 3 data nodes |
-| Kibana | ismelkkbnnode01.ocplab.net | 10.44.40.41 | Up, HTTP 200 |
-| Fleet Server | ismelkflnode01.ocplab.net | 10.44.40.42 | HEALTHY, port 8220 |
-| Elastic Agents | ES×3 + Kibana + Fleet | — | 5 enrolled |
+| Elasticsearch es01 | ismelkesnode01.ocplab.net | 10.44.40.31 | 8.18.4 — master, data_content |
+| Elasticsearch es02 | ismelkesnode02.ocplab.net | 10.44.40.32 | 8.18.4 — master, data_content (often elected master) |
+| Elasticsearch es03 | ismelkesnode03.ocplab.net | 10.44.40.33 | 8.18.4 — master, data_content, **data_hot** |
+| Elasticsearch es04 | ismelkesnode04.ocplab.net | 10.44.40.34 | **8.19.18** — data_hot, ingest, remote, transform |
+| Kibana | ismelkkbnnode01.ocplab.net | 10.44.40.41 | Up |
+| Fleet Server | ismelkflnode01.ocplab.net | 10.44.40.42 | Fleet + lab APM Server on :8200 |
 
-- **Cluster:** `ism-elk-cluster`
-- **Current versions:** Elasticsearch **9.4.1**; Kibana / Fleet Server / agents **8.18.4**
-- **Baseline snapshot:** `pre-upgrade-9.4.1-20260629-1535` (rollback point for all 5 VMs)
-- **Install method:** RPM (ES/Kibana), **tar.gz archive** (Fleet Server + agents)
-- **Pre-upgrade snapshot:** `pre-upgrade-9.4.1-20260629-1535` (all 5 VMs)
+- **Cluster:** `ism-elk-cluster` (4 ES nodes joined)
+- **Health:** **yellow** — all primaries assigned; ~4 unassigned **replicas** on restricted system indices (mixed 8.18.4 / 8.19.18). See [docs/LAB_OPS_8_18_8_19.md](docs/LAB_OPS_8_18_8_19.md).
+- **Snapshot repo:** `fs_nfs_snapshots`
+- **Install method:** RPM (ES/Kibana); tar.gz (Fleet Server + agents)
+- **Baseline lab path:** 8.18.4 with optional rolling ES upgrade to **8.19.18**
 
 ## Access URLs
 
@@ -22,46 +24,52 @@
 | Elasticsearch | https://ismelkesnode01.ocplab.net:9200 |
 | Kibana | http://ismelkkbnnode01.ocplab.net:5601 |
 | Fleet Server | https://ismelkflnode01.ocplab.net:8220 |
+| APM (lab) | http://ismelkflnode01.ocplab.net:8200 |
 
-Elastic superuser password is reset by several helper scripts — use `show_elastic_password.py` or `elasticsearch-reset-password` on ES01 to obtain the current value. **Do not commit passwords to git.**
+Elastic password: `secrets/elastic-password` or `python show_elastic_password.py`. **Do not commit passwords.**
 
-## Upgrade runbook
+## Recent lab milestones (July 2026)
 
-### 1. Download packages
+1. Stripped es01–es03 data roles to **data_content** (es03 later re-added **data_hot** for tier prefs).
+2. Hyper-V snaps: `pre-upgrade-system-8.18.4-*`, `pre-upgrade-system-8.18.4-with-apm`, `post-upgrade-system-8.19.18-*`.
+3. Rolling ES upgrade to **8.19.18** with timed orchestrator (`upgrade_es_to_8_19_18.py`).
+4. Standalone APM on Fleet host + observability/APM sample alert rules; second ES + HV snaps with APM.
+5. **Downgrade experiment:** RPM reinstall 8.18.4 on es01–es03, wipe data, restore NFS snapshot — es04 **does not** rejoin if cluster UUID changes.
+6. **HV restore** of es01–es03 to `pre-upgrade-system-8.18.4-with-apm` — es04 **rejoins** (mixed version).
+7. Yellow mitigation: set replicas to 0 and disable `auto_expand_replicas` on non-system indices (`fix_yellow_mixed_version.py`). Residual yellow = system/restricted indices only.
+
+## Hyper-V snapshot workflow
 
 ```powershell
-python download_upgrade_packages.py
+# Elevated where required
+.\Checkpoint-EsNodes.ps1 -SnapshotName pre-upgrade-system-8.18.4-with-apm
+.\Restore-Es01to03-To-Snap.ps1 -SnapshotName pre-upgrade-system-8.18.4-with-apm
+.\Remove-And-Retake-HyperVSnap.ps1 -SnapshotName post-upgrade-system-8.19.18-20260724
 ```
 
-### 2. Create checkpoints (before any upgrade)
+Python elevation wrappers: `run_hv_snap_elevated.py`, `run_hv_retake_post81918.py`.
 
-```powershell
-.\Snapshot-ElasticVMs.ps1
-```
-
-### 3. Choose upgrade path
+## Upgrade / downgrade commands
 
 | Goal | Command |
 |------|---------|
-| Full stack (ES + Kibana + agents → 9.4.1) | `python upgrade_elastic_stack.py` |
-| ES only (Kibana/Fleet stay @ 8.18.4) | `python upgrade_es_only.py` |
-| Fleet rollback + artifact upgrade | `python rollback_upgrade_fleet.py` |
-| Fleet rollback + reinstall fallback | `python rollback_reinstall_fleet.py` |
-| Agents only (Fleet already @ target) | `python fleet_bulk_upgrade_agents.py` |
+| Download offline packages | `python download_upgrade_packages.py` |
+| ES rolling upgrade → 8.19.18 | `python upgrade_es_to_8_19_18.py` |
+| Per-node 8.18.4 RPM path | `scripts/downgrade-es-node-8184.sh` |
+| Full downgrade + snapshot restore | `python complete_downgrade_restore.py` |
+| Reduce yellow (mixed version) | `python fix_yellow_mixed_version.py` |
+| APM + alert rules + snaps | `python deploy_apm_finish.py` then `python create_obs_apm_alerts_and_snaps.py` |
 
-### 4. Rollback all VMs
+Full narrative: **[docs/LAB_OPS_8_18_8_19.md](docs/LAB_OPS_8_18_8_19.md)**  
+Downgrade run report: `logs/downgrade_es01_03_procedure_report.txt`
 
-```powershell
-.\Restore-ElasticVMs.ps1 -SnapshotName pre-upgrade-9.4.1-20260629-1535
-```
+## Path to green (mixed cluster)
 
-ES rolling order: `ismelkesnode03` (cold) → `ismelkesnode01` (warm) → `ismelkesnode02` (hot/master).
+1. **Preferred:** rolling-upgrade es01–es03 to 8.19.18 so replicas of 8.19 primaries can allocate.
+2. **Or:** Hyper-V restore **all** ES nodes (including es04) to the same 8.18.4 snap.
+3. Do **not** expect green with a single 8.19 hot node holding system-index primaries and 8.18 masters only.
 
-Upgrade path: **8.18.4 → 8.19.9 → 9.4.1** (Elastic requires 8.19 before 9.4).
-
-Artifact mirror for agent upgrades: `http://10.44.40.42:8081/downloads/`
-
-## x.509 / custom CA fix (complete)
+## x.509 / custom CA
 
 Elasticsearch auto-configured `http_ca.crt` is used as the custom CA during elastic-agent enrollment.
 
@@ -73,24 +81,10 @@ Elasticsearch auto-configured `http_ca.crt` is used as the custom CA during elas
 | `--fleet-server-es-ca=...` | Fleet Server |
 | `--fleet-server-es-ca-trusted-fingerprint=e8c9d21d469b064de993e40313e6f8312304356eeea9ff2d633a033b22792bd1` | Fleet Server |
 
-**CA staged at:** `/opt/elastic-setup/certs/`, `/etc/elasticsearch/certs/`, `/etc/elastic-agent/certs/`
+## Air-gapped Fleet
 
-- Fleet Server: trusts ES via custom CA (no `--insecure` for ES)
-- Regular agents: custom CA for ES + `--insecure` only for Fleet Server self-signed cert on 8220
-
-## Air-gapped Fleet (complete)
-
-Kibana cannot reach `epr.elastic.co`. Local package registry mock on port 8080:
-
-- `scripts/local-epr-server.py` + `scripts/install-local-epr.sh` → systemd `local-epr.service`
-- `scripts/configure-fleet-airgap.sh` → `xpack.fleet.isAirGapped: true`, `registryUrl: http://127.0.0.1:8080`
-- `deploy_local_epr.py` orchestrates EPR + air-gap + fleet_server integration
-
-Agent artifact mirror on Fleet (port 8081) for `bulk_upgrade`:
-
-- `scripts/agent-artifact-server.py` + `agent_artifact_upgrade.py`
-
-Bundled packages on Kibana include `fleet_server-1.6.0.zip`, `elastic_agent-2.3.0.zip`.
+- Local EPR mock on port 8080; artifact mirror on Fleet `:8081`
+- `deploy_local_epr.py`, `scripts/local-epr-server.py`, `scripts/configure-fleet-airgap.sh`
 
 ## Fleet policy IDs (stable)
 
@@ -101,40 +95,17 @@ Bundled packages on Kibana include `fleet_server-1.6.0.zip`, `elastic_agent-2.3.
 | Kibana agent | `3b226858-3140-4a6b-b044-05dc7819a338` |
 | fleet_server package policy | `50a076fc-cfd6-48ab-b478-5f3ca207c400` |
 
-## Scripts with safety guards (skip when healthy)
-
-These exit immediately if Fleet is already HEALTHY — do not disrupt a working stack:
-
-- `kill_fleet_enroll.py`
-- `rerun_fleet_server.py`
-- `redeploy_fleet_only.py`
-- `fix_fleet_integration.py`
-- `run_create_fleet_policy.py`
-- `bg_create_fleet_policy.py`
-- `recover_kibana.py` (skips if Kibana stable)
-- `resume_agent_deploy.py` (skips if 5+ agents enrolled)
-
-## Do NOT run (destructive / redundant)
-
-- `kill_fleet_enroll.py` + `rerun_fleet_server.py` while Fleet is healthy
-- Repeated `fix_fleet_integration.py`, `fix_airgap_fleet.py`, `run_create_fleet_policy.py` — integration already exists
-- `rollback_upgrade_fleet.py` unless Fleet rollback is intentional (~20–30 min, unenrolls Fleet)
-
-## Known gaps
-
-Monitoring integrations require packages not in local EPR:
-
-- `system@1.60.0`
-- `elasticsearch@1.12.0`
-- `kibana@1.11.0`
-
-Agents enroll successfully; stack monitoring integrations cannot be added until those zips are bundled.
-
-## Safe verification commands
+## Safe verification
 
 ```powershell
 cd C:\Users\terry.ng\Repository\elastic_stack_on_hyper-v
-python run_with_pass.py fleet_ps.py
-python run_with_pass.py verify_kibana.py
 python show_elastic_password.py
+python fix_yellow_mixed_version.py
+# or curl health against es01 with secrets/elastic-password
 ```
+
+## Do not commit
+
+- `config.psd1`, `secrets/*` passwords
+- `packages/*.rpm` / large archives
+- One-shot `_dbg_*` / `_q*` helpers (local only)

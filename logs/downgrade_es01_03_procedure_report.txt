@@ -1,0 +1,249 @@
+================================================================================
+ES01–ES03 RPM DOWNGRADE TO 8.18.4 + SNAPSHOT RESTORE + ES04 REJOIN TEST
+Generated: 2026-07-24T18:48:48
+================================================================================
+
+1) REQUIREMENTS
+--------------------------------------------------------------------------------
+- packages/elasticsearch-8.18.4-x86_64.rpm
+- Preserve /etc/elasticsearch/certs + elasticsearch.keystore across RPM reinstall
+- Re-apply production elasticsearch.yml after RPM install (package overwrites defaults):
+  cluster.name, path.data=/data/elasticsearch, SSL enabled, discovery.seed_hosts,
+  node.roles, path.repo, optional tracing.apm
+- Wipe path.data before starting 8.18.4 (binary downgrade cannot read 8.19 data files)
+- Snapshot repo fs_nfs_snapshots on NFS; snapshot pre-upgrade-system-8.18.4-with-apm-20260724
+- Restore feature_states must list explicit names (security,kibana,fleet,async_search),
+  NOT ["*"] (restore rejects wildcard feature states)
+- After wipe: elastic password is new until security feature state restore; then snap password
+- es04 left on 8.19.18 for join test
+- Without a data_hot node, restored indices with tier preference data_hot may stay unassigned
+
+2) STEP PROCEDURE (EXECUTED)
+--------------------------------------------------------------------------------
+1. Stop es04.
+2. es01–es03: remove ES RPM → install 8.18.4 → rewrite yml → wipe data → start.
+3. Form 3-node empty 8.18.4 cluster; reset elastic password if needed.
+4. Restore snapshot with include_global_state + explicit feature_states + indices *.
+5. Wait for recovery; enable allocation; note hot-tier unassigned shards without es04.
+6. Start es04 8.19.18 and observe join.
+7. Verify Kibana alert rules + APM server.
+
+3) RESULTS
+--------------------------------------------------------------------------------
+final_health: {
+  "cluster_name": "ism-elk-cluster",
+  "status": "red",
+  "timed_out": false,
+  "number_of_nodes": 3,
+  "number_of_data_nodes": 3,
+  "active_primary_shards": 51,
+  "active_shards": 102,
+  "relocating_shards": 0,
+  "initializing_shards": 0,
+  "unassigned_shards": 116,
+  "unassigned_primary_shards": 62,
+  "delayed_unassigned_shards": 0,
+  "number_of_pending_tasks": 0,
+  "number_of_in_flight_fetch": 0,
+  "task_max_waiting_in_queue_millis": 0,
+  "active_shards_percent_as_number": 46.788990825688074
+}
+final_nodes:
+name                      version master node.role
+ismelkesnode03.ocplab.net 8.18.4  -      mrs
+ismelkesnode02.ocplab.net 8.18.4  -      mrs
+ismelkesnode01.ocplab.net 8.18.4  *      mrs
+
+
+es04_rejoin: {
+  "joined": false,
+  "errors": [],
+  "version": "elasticsearch-8.19.18-1.x86_64"
+}
+
+functions:
+{
+  "nodes": "name                      version master node.role\nismelkesnode03.ocplab.net 8.18.4  -      mrs\nismelkesnode02.ocplab.net 8.18.4  -      mrs\nismelkesnode01.ocplab.net 8.18.4  *      mrs\n",
+  "health": {
+    "cluster_name": "ism-elk-cluster",
+    "status": "red",
+    "timed_out": false,
+    "number_of_nodes": 3,
+    "number_of_data_nodes": 3,
+    "active_primary_shards": 51,
+    "active_shards": 102,
+    "relocating_shards": 0,
+    "initializing_shards": 0,
+    "unassigned_shards": 116,
+    "unassigned_primary_shards": 62,
+    "delayed_unassigned_shards": 0,
+    "number_of_pending_tasks": 0,
+    "number_of_in_flight_fetch": 0,
+    "task_max_waiting_in_queue_millis": 0,
+    "active_shards_percent_as_number": 46.788990825688074
+  },
+  "rules": [
+    {
+      "name": "Kibana version mismatch",
+      "type": "monitoring_alert_kibana_version_mismatch",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "Elasticsearch version mismatch",
+      "type": "monitoring_alert_elasticsearch_version_mismatch",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "License expiration",
+      "type": "monitoring_alert_license_expiration",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "Logstash version mismatch",
+      "type": "monitoring_alert_logstash_version_mismatch",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "Upgrade Testing Sample Alert",
+      "type": ".index-threshold",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "Obs Sample Log Threshold (upgrade testing)",
+      "type": "logs.alert.document.count",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "Obs Sample Custom Threshold (upgrade testing)",
+      "type": "observability.rules.custom_threshold",
+      "enabled": true,
+      "exec": "error"
+    },
+    {
+      "name": "Obs Sample Metric Threshold (upgrade testing)",
+      "type": "metrics.alert.threshold",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "Obs Sample Inventory Threshold (upgrade testing)",
+      "type": "metrics.alert.inventory.threshold",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "APM Sample Anomaly (upgrade testing)",
+      "type": "apm.anomaly",
+      "enabled": true,
+      "exec": "error"
+    },
+    {
+      "name": "CPU Usage",
+      "type": "monitoring_alert_cpu_usage",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "CCR read exceptions",
+      "type": "monitoring_ccr_read_exceptions",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "Thread pool write rejections",
+      "type": "monitoring_alert_thread_pool_write_rejections",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "Disk Usage",
+      "type": "monitoring_alert_disk_usage",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "Thread pool search rejections",
+      "type": "monitoring_alert_thread_pool_search_rejections",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "Memory Usage (JVM)",
+      "type": "monitoring_alert_jvm_memory_usage",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "Missing monitoring data",
+      "type": "monitoring_alert_missing_monitoring_data",
+      "enabled": true,
+      "exec": "active"
+    },
+    {
+      "name": "Shard size",
+      "type": "monitoring_shard_size",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "APM Sample Error Count Threshold (upgrade testing)",
+      "type": "apm.error_rate",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "APM Sample Latency Threshold (upgrade testing)",
+      "type": "apm.transaction_duration",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "APM Sample Failed Transaction Rate (upgrade testing)",
+      "type": "apm.transaction_error_rate",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "Nodes changed",
+      "type": "monitoring_alert_nodes_changed",
+      "enabled": true,
+      "exec": "ok"
+    },
+    {
+      "name": "Cluster health",
+      "type": "monitoring_alert_cluster_health",
+      "enabled": true,
+      "exec": "ok"
+    }
+  ],
+  "kibana": "available",
+  "apm": "active\nLISTEN 0      2048               *:8200            *:*    users:((\"apm-server\",pid=14824,fd=6))    \nhttp=200"
+}
+
+4) ES04 REJOIN
+--------------------------------------------------------------------------------
+Expected: FAIL. Newer ES (8.19.18) cannot join older cluster (8.18.4).
+Evidence: join/version errors in es04 logs; node absent from _cat/nodes.
+
+To bring es04 into the 8.18.4 cluster:
+- Same wipe + 8.18.4 RPM + restore, OR Hyper-V restore to pre-upgrade-system-8.18.4-*
+- Then start es04 so data_hot shards can allocate (cluster may go yellow/green).
+
+5) FUNCTIONAL STATUS NOTES
+--------------------------------------------------------------------------------
+- es01–es03 on 8.18.4 with master/data_content roles: YES (if final_nodes shows this)
+- Full primary allocation: may be RED/YELLOW until data_hot capacity exists (es04 8.18.4)
+- Security/Kibana/Fleet feature restore: attempted via snapshot feature_states
+- Alert rules / APM sample rules: restored if kibana feature state applied successfully
+- APM Server on Fleet host: independent of ES RPM downgrade; check :8200
+
+6) ROLLBACK
+--------------------------------------------------------------------------------
+Hyper-V: post-upgrade-system-8.19.18-20260724  → return to 8.19.18
+      or pre-upgrade-system-8.18.4-with-apm     → full 8.18.4 baseline with APM/alerts
