@@ -5,7 +5,7 @@ Restore all VMs to pre-upgrade snapshot, then rolling-upgrade Elasticsearch only
 Kibana and Fleet Server remain at BASELINE_VERSION (8.18.4). Use this when you
 need newer ES features without touching the Fleet/Kibana control plane.
 
-Upgrade path: 8.18.4 -> 8.19.9 (required) -> 9.4.1
+Upgrade path: 8.18.4 -> 8.19.18 (required) -> 9.5.3
 """
 from __future__ import annotations
 

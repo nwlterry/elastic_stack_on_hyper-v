@@ -231,9 +231,13 @@ def wait_stable(
                         versions_ok = all(r.get("version") == target for r in rows)
                     else:
                         versions_ok = True  # mid-upgrade: health is enough
+            # Mid-upgrade: green with a leftover relocation is safe to continue.
+            reloc_ok = reloc == 0 or (
+                exclude_key is not None and status == "green" and uprim == 0
+            )
             health_ok = (
                 status in ("green", "yellow")
-                and reloc == 0
+                and reloc_ok
                 and init == 0
                 and uprim == 0
                 and (not require_all_nodes or nodes == EXPECTED_NODES)

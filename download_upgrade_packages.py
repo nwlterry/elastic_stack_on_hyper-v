@@ -8,9 +8,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 PKG_DIR = ROOT / "packages"
+# 8.19.x is required before any 9.1+ upgrade. 8.19.18 is the lab intermediate;
+# 9.5.3 is the current 9.x target (packages only — run upgrade separately).
 VERSIONS = {
-    "intermediate": "8.19.9",
-    "target": "9.4.1",
+    "intermediate": "8.19.18",
+    "target": "9.5.3",
 }
 ARTIFACTS = [
     ("elasticsearch", "rpm"),

@@ -1,21 +1,21 @@
-# Deployment Status — ism-elk-cluster (2026-07-27)
+# Deployment Status — ism-elk-cluster (2026-09-10)
 
 ## Stack overview
 
 | Component | FQDN | IP | Status |
 |-----------|------|-----|--------|
-| Elasticsearch es01 | ismelkesnode01.ocplab.net | 10.44.40.31 | 8.18.4 — master, data_content |
-| Elasticsearch es02 | ismelkesnode02.ocplab.net | 10.44.40.32 | 8.18.4 — master, data_content (often elected master) |
-| Elasticsearch es03 | ismelkesnode03.ocplab.net | 10.44.40.33 | 8.18.4 — master, data_content, **data_hot** |
+| Elasticsearch es01 | ismelkesnode01.ocplab.net | 10.44.40.31 | **8.19.18** — master, data_content (elected master after roll) |
+| Elasticsearch es02 | ismelkesnode02.ocplab.net | 10.44.40.32 | **8.19.18** — master, data_content |
+| Elasticsearch es03 | ismelkesnode03.ocplab.net | 10.44.40.33 | **8.19.18** — master, data_content, **data_hot** |
 | Elasticsearch es04 | ismelkesnode04.ocplab.net | 10.44.40.34 | **8.19.18** — data_hot, ingest, remote, transform |
-| Kibana | ismelkkbnnode01.ocplab.net | 10.44.40.41 | Up |
+| Kibana | ismelkkbnnode01.ocplab.net | 10.44.40.41 | **8.19.18** — `/api/status` available |
 | Fleet Server | ismelkflnode01.ocplab.net | 10.44.40.42 | Fleet + lab APM Server on :8200 |
 
 - **Cluster:** `ism-elk-cluster` (4 ES nodes joined)
-- **Health:** **yellow** — all primaries assigned; ~4 unassigned **replicas** on restricted system indices (mixed 8.18.4 / 8.19.18). See [docs/LAB_OPS_8_18_8_19.md](docs/LAB_OPS_8_18_8_19.md).
-- **Snapshot repo:** `fs_nfs_snapshots`
+- **Health:** **green** after aligning all ES nodes on **8.19.18** (220 primaries, 336 shards). Mixed 8.18.4/8.19.18 yellow is resolved.
+- **Snapshot repo:** `fs_nfs_snapshots` (re-registered 2026-09-10 after es02/es03 lost the NFS mount)
 - **Install method:** RPM (ES/Kibana); tar.gz (Fleet Server + agents)
-- **Baseline lab path:** 8.18.4 with optional rolling ES upgrade to **8.19.18**
+- **Current lab path:** full stack **8.19.18**. Next major: **9.5.3** (`docs/LAB_OPS_9_5_3.md`). Bootstrap remains 8.18.4.
 
 ## Access URLs
 
@@ -28,15 +28,16 @@
 
 Elastic password: `secrets/elastic-password` or `python show_elastic_password.py`. **Do not commit passwords.**
 
-## Recent lab milestones (July 2026)
+## Recent lab milestones (September 2026)
 
-1. Stripped es01–es03 data roles to **data_content** (es03 later re-added **data_hot** for tier prefs).
-2. Hyper-V snaps: `pre-upgrade-system-8.18.4-*`, `pre-upgrade-system-8.18.4-with-apm`, `post-upgrade-system-8.19.18-*`.
-3. Rolling ES upgrade to **8.19.18** with timed orchestrator (`upgrade_es_to_8_19_18.py`).
-4. Standalone APM on Fleet host + observability/APM sample alert rules; second ES + HV snaps with APM.
-5. **Downgrade experiment:** RPM reinstall 8.18.4 on es01–es03, wipe data, restore NFS snapshot — es04 **does not** rejoin if cluster UUID changes.
-6. **HV restore** of es01–es03 to `pre-upgrade-system-8.18.4-with-apm` — es04 **rejoins** (mixed version).
-7. Yellow mitigation: set replicas to 0 and disable `auto_expand_replicas` on non-system indices (`fix_yellow_mixed_version.py`). Residual yellow = system/restricted indices only.
+1. **2026-09-10:** Rolling-upgraded remaining ES nodes (es01–es03) from 8.18.4 → **8.19.18**; es04 was already 8.19.18. Cluster went **green**. Kibana RPM **8.19.18**.
+2. NFS `fs_nfs_snapshots` was disabled (`index-13` / master verify failed) because **es02 and es03 had no NFS mount**. Fix: `python remount_es_nfs.py` then `python create_named_snapshot.py --reregister --name pre-upgrade-to-8.19.18-20260910`.
+3. Local RPM upgrades must use `dnf install --disablerepo='*'` — stale `rhel-dvd-local.repo` otherwise fails after ES is already stopped.
+4. Offline packages for **8.19.18** and **9.5.3** in `packages/` (`python download_upgrade_packages.py`).
+5. 9.5.3 is **prepared, not executed**. Run `python prepare_upgrade_9_5_3.py` then Upgrade Assistant before `python upgrade_elastic_stack.py --to 9.5.3`.
+6. Fleet API currently reports **0 enrolled agents** (policies still present). `bulk_upgrade` needs a healthy Fleet Server enrollment first (`finish_agent_upgrade.py --version 8.19.18`). es04 agent binary was missing before this wave.
+
+July 2026 history (mixed-version / downgrade / APM) remains in [docs/LAB_OPS_8_18_8_19.md](docs/LAB_OPS_8_18_8_19.md).
 
 ## Hyper-V snapshot workflow
 
@@ -53,19 +54,25 @@ Python elevation wrappers: `run_hv_snap_elevated.py`, `run_hv_retake_post81918.p
 
 | Goal | Command |
 |------|---------|
-| Download offline packages | `python download_upgrade_packages.py` |
-| ES rolling upgrade → 8.19.18 | `python upgrade_es_to_8_19_18.py` |
+| Download offline packages (8.19.18 + 9.5.3) | `python download_upgrade_packages.py` |
+| ES + Kibana + agents → 8.19.18 | `python upgrade_elastic_stack.py --to 8.19.18` |
+| ES-only timed roll → 8.19.18 | `python upgrade_es_to_8_19_18.py` |
+| Remount NFS snapshot share | `python remount_es_nfs.py` |
+| NFS snapshot (no deletes) | `python create_named_snapshot.py --reregister --name <name>` |
+| 9.5.3 preflight | `python prepare_upgrade_9_5_3.py` |
+| 9.5.3 roll (after Assistant) | `python upgrade_elastic_stack.py --to 9.5.3` |
 | Per-node 8.18.4 RPM path | `scripts/downgrade-es-node-8184.sh` |
 | Full downgrade + snapshot restore | `python complete_downgrade_restore.py` |
 | Reduce yellow (mixed version) | `python fix_yellow_mixed_version.py` |
-| APM + alert rules + snaps | `python deploy_apm_finish.py` then `python create_obs_apm_alerts_and_snaps.py` |
 
 Full narrative: **[docs/LAB_OPS_8_18_8_19.md](docs/LAB_OPS_8_18_8_19.md)**  
 Downgrade run report: `logs/downgrade_es01_03_procedure_report.txt`
 
 ## Path to green (mixed cluster)
 
-1. **Preferred:** rolling-upgrade es01–es03 to 8.19.18 so replicas of 8.19 primaries can allocate.
+Resolved **2026-09-10** by rolling es01–es03 to 8.19.18 (all four nodes same version). Historical options if mixed again:
+
+1. **Preferred:** rolling-upgrade remaining 8.18 nodes to 8.19.18 so replicas of 8.19 primaries can allocate.
 2. **Or:** Hyper-V restore **all** ES nodes (including es04) to the same 8.18.4 snap.
 3. Do **not** expect green with a single 8.19 hot node holding system-index primaries and 8.18 masters only.
 

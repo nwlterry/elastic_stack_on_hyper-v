@@ -6,6 +6,7 @@ Automated deployment and upgrade of **Elasticsearch** (4 nodes), **Kibana**, **F
 |-----|----------|
 | **[DEPLOYMENT_STATUS.md](DEPLOYMENT_STATUS.md)** | Live verified stack state, policy IDs, safe commands |
 | **[docs/LAB_OPS_8_18_8_19.md](docs/LAB_OPS_8_18_8_19.md)** | Full 8.18.4 ↔ 8.19.18 upgrade, HV snaps, APM, rejoin, yellow health |
+| **[docs/LAB_OPS_9_5_3.md](docs/LAB_OPS_9_5_3.md)** | Prepare and roll 8.19.18 → 9.5.3 (Upgrade Assistant, snaps, orchestrator) |
 
 ## Architecture
 
@@ -35,8 +36,9 @@ Disk / NFS helpers for es04: `Add-Es04AndNfsDisk.ps1`, `scripts/setup-es-nfs-rep
 - **Domain:** `ocplab.net`
 - **Data path:** `/data/elasticsearch` (lab); certs under `/etc/elasticsearch/certs`
 - **Snapshot repo:** `fs_nfs_snapshots` (NFS, typically `/mnt/es-snapshots` → `path.repo`)
-- **Baseline version:** Elasticsearch / Kibana / Elastic Agent **8.18.4**
-- **Optional ES target:** rolling upgrade to **8.19.18** (`upgrade_es_to_8_19_18.py`)
+- **Bootstrap version:** Elasticsearch / Kibana / Elastic Agent **8.18.4**
+- **Current upgrade target:** full stack **8.19.18** (`python upgrade_elastic_stack.py --to 8.19.18`)
+- **Next major:** **9.5.3** after Upgrade Assistant + snaps (`docs/LAB_OPS_9_5_3.md`)
 - **Fleet / agents:** elastic-agent **tar.gz** (not RPM)
 - **Install method:** RPM (ES / Kibana); archive (Fleet + agents)
 
@@ -126,6 +128,9 @@ Full narrative: **[docs/LAB_OPS_8_18_8_19.md](docs/LAB_OPS_8_18_8_19.md)**. Live
 | Full wipe + NFS snapshot restore lab path | `python complete_downgrade_restore.py` |
 | Finish restore / es04 join checks | `python finish_downgrade_restore_es04.py` |
 | Reduce yellow (mixed version) | `python fix_yellow_mixed_version.py` |
+| Remount NFS snapshot share on ES nodes | `python remount_es_nfs.py` |
+| NFS snapshot without deleting old snaps | `python create_named_snapshot.py --reregister --name <name>` |
+| 9.5.3 preflight | `python prepare_upgrade_9_5_3.py` |
 | APM Server on Fleet host | `python deploy_apm_finish.py` |
 | Sample Obs/APM alerts + ES/HV snaps | `python create_obs_apm_alerts_and_snaps.py` |
 | NFS snapshot export / ES client | `scripts/setup-nfs-snapshot-export.sh`, `scripts/setup-es-nfs-repo-client.sh` |
@@ -191,27 +196,36 @@ APM intake: `http://10.44.40.42:8200` (ismelkflnode01).
 python download_upgrade_packages.py
 ```
 
-Downloads Elasticsearch/Kibana RPMs and agent archives for **8.19.9** / **8.19.18** and **9.4.1** into `packages/`.
+Downloads Elasticsearch/Kibana RPMs and agent archives for **8.19.18** (intermediate) and **9.5.3** (major target) into `packages/`.
 
 ### Create pre-upgrade checkpoints (stack VMs)
 
 ```powershell
 .\Snapshot-ElasticVMs.ps1
-# Default name: pre-upgrade-9.4.1-YYYYMMDD-HHmm
+# Default name: pre-upgrade-9.5.3
 # Or ES-focused:
-.\Checkpoint-EsNodes.ps1 -SnapshotName pre-upgrade-system-8.18.4-with-apm
-.\Checkpoint-AllStackVMs.ps1 -SnapshotName pre-upgrade-system-8.18.4-with-apm
+.\Checkpoint-EsNodes.ps1 -SnapshotName pre-upgrade-to-8.19.18
+.\Checkpoint-AllStackVMs.ps1 -SnapshotName pre-upgrade-to-8.19.18
+```
+
+NFS snapshot (does not delete existing snaps):
+
+```powershell
+python create_named_snapshot.py --name pre-upgrade-to-8.19.18 --because "before 8.19.18"
 ```
 
 ### Full stack upgrade (ES + Kibana + agents)
 
-Rolling path: **8.18.4 → 8.19.x → 9.4.1**
+Required path: **8.18.4 → 8.19.18 → 9.5.3**. Never jump 8.18 → 9.x.
 
 ```powershell
-python upgrade_elastic_stack.py
+python upgrade_elastic_stack.py --to 8.19.18
+# After Upgrade Assistant is clean:
+python prepare_upgrade_9_5_3.py
+python upgrade_elastic_stack.py --to 9.5.3
 ```
 
-Upgrades ES nodes (including **es04** when joined), Kibana, and Fleet-managed agents via artifact mirror.
+Upgrades ES nodes (including **es04** when joined), Kibana, and Fleet-managed agents via artifact mirror. Default `--to` is **8.19.18**.
 
 ### ES-only upgrade to 8.19.18 (lab)
 
@@ -240,7 +254,7 @@ python fleet_bulk_upgrade_agents.py  # when Fleet already at target
 ### Restore VMs from checkpoint
 
 ```powershell
-.\Restore-ElasticVMs.ps1 -SnapshotName pre-upgrade-9.4.1-20260629-1535
+.\Restore-ElasticVMs.ps1 -SnapshotName pre-upgrade-to-9.5.3
 .\Restore-EsNodes-To-Snap.ps1 -SnapshotName pre-upgrade-system-8.18.4-with-apm
 .\Restore-Es01to03-To-Snap.ps1 -SnapshotName pre-upgrade-system-8.18.4-with-apm
 # Or:
@@ -286,9 +300,12 @@ Fleet and agents trust the ES auto-configured CA via `scripts/elastic-agent-ca.s
 | Script | Purpose |
 |--------|---------|
 | `upgrade_es_to_8_19_18.py` | Timed rolling ES upgrade to 8.19.18 (es01–**es04**) |
-| `upgrade_elastic_stack.py` | Full stack rolling upgrade toward 9.4.1 |
+| `upgrade_elastic_stack.py` | Full stack rolling upgrade `--to 8.19.18` or `--to 9.5.3` |
+| `prepare_upgrade_9_5_3.py` | Preflight for 9.5.3 (packages, versions, deprecations) |
+| `create_named_snapshot.py` | NFS snapshot without deleting existing snaps |
+| `print_stack_versions.py` | ES/Kibana RPM + agent binaries (no password print) |
 | `upgrade_es_only.py` | Restore snapshots + ES-only upgrade helper |
-| `download_upgrade_packages.py` | Fetch offline RPMs/archives |
+| `download_upgrade_packages.py` | Fetch offline RPMs/archives (8.19.18 + 9.5.3) |
 | `scripts/downgrade-es-node-8184.sh` | Per-node RPM reinstall to 8.18.4 |
 | `complete_downgrade_restore.py` | Wipe + NFS snapshot restore lab path |
 | `finish_downgrade_restore_es04.py` | Post-restore / **es04** join checks |

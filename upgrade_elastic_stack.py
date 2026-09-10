@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Rolling upgrade ism-elk-cluster: 8.18.4 -> 8.19.9 -> 9.4.1 (Elastic requires 8.19 before 9.4).
+Rolling upgrade ism-elk-cluster.
 
-Node order (homogeneous data+master roles; master upgraded last):
-  ES data_cold  -> ismelkesnode03
-  ES data_warm  -> ismelkesnode01
-  ES data_hot   -> ismelkesnode02 (current master)
-  Kibana        -> ismelkkbnnode01
-  Fleet Server  -> ismelkflnode01
-  Elastic Agent -> all enrolled agents (ES, Kibana, Fleet) via Fleet bulk_upgrade + artifact mirror
+Supported --to targets:
+  8.19.18  Elasticsearch + Kibana + Fleet-managed agents (required before 9.1+)
+  9.5.3    Major upgrade; all ES nodes must already be on 8.19.x
+
+Node order: non-master ES first (es04, es03, es01, es02), current master last;
+then Kibana; then Fleet Server + agents via Fleet bulk_upgrade + artifact mirror.
+
+Do not run 8.19.18 and 9.5.3 in one shot. Stay on 8.19.18, run Upgrade Assistant,
+take Hyper-V + NFS snapshots, then --to 9.5.3.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import shlex
-import sys
 import time
 from pathlib import Path
 
@@ -33,15 +35,17 @@ from scan_cluster_config import main as scan_cluster_config
 
 ROOT = Path(__file__).parent
 BASELINE_VERSION = "8.18.4"
-INTERMEDIATE_VERSION = "8.19.9"
-TARGET_VERSION = "9.4.1"
-SNAPSHOT_NAME = "pre-upgrade-9.4.1-20260629-1535"
+INTERMEDIATE_VERSION = "8.19.18"
+TARGET_VERSION = "9.5.3"
+SNAPSHOT_NAME = "pre-upgrade-9.5.3"
+EXPECTED_ES_NODES = 4
 
-# Elastic rolling order: cold tier -> warm -> hot/master (3 homogeneous nodes).
+# Fallback labels if dynamic master detection is unavailable.
 ES_UPGRADE_ORDER: list[tuple[str, str, str]] = [
-    ("es03", "data_cold", "Upgrade ES data_cold tier (ismelkesnode03)"),
-    ("es01", "data_warm", "Upgrade ES data_warm tier (ismelkesnode01)"),
-    ("es02", "data_hot_master", "Upgrade ES data_hot + master (ismelkesnode02)"),
+    ("es04", "data_hot", "Upgrade ES es04 (data_hot/ingest/transform)"),
+    ("es03", "data_hot_content", "Upgrade ES es03 (data_content + data_hot)"),
+    ("es01", "data_content", "Upgrade ES es01 (data_content)"),
+    ("es02", "data_content_master", "Upgrade ES es02 (data_content, often elected master)"),
 ]
 
 
@@ -102,19 +106,58 @@ def wait_cluster_green(es, auth: str, timeout: int = 900) -> bool:
     return False
 
 
-def all_es_on_version(es, auth: str, version: str) -> bool:
+def cat_nodes(es, auth: str) -> list[dict]:
     out = run(
         es,
-        f"curl -sk -u {auth} 'https://localhost:9200/_cat/nodes?h=name,version&format=json'",
+        f"curl -sk -u {auth} 'https://localhost:9200/_cat/nodes?h=name,version,master,node.role&format=json'",
         check=False,
     )
     try:
         rows = json.loads(out.strip().splitlines()[-1])
     except json.JSONDecodeError:
-        return False
-    if len(rows) != 3:
+        return []
+    return rows if isinstance(rows, list) else []
+
+
+def all_es_on_version(es, auth: str, version: str) -> bool:
+    rows = cat_nodes(es, auth)
+    if len(rows) != EXPECTED_ES_NODES:
         return False
     return all(r.get("version") == version for r in rows)
+
+
+def node_already_on_version(es, auth: str, fqdn: str, version: str) -> bool:
+    short = fqdn.split(".")[0]
+    for r in cat_nodes(es, auth):
+        name = r.get("name") or ""
+        if (short in name or fqdn in name) and r.get("version") == version:
+            return True
+    return False
+
+
+def es_keys_master_last(es, auth: str) -> list[tuple[str, str, str]]:
+    """Non-master first; current master last. Includes es04 when present."""
+    labels = {k: (tier, label) for k, tier, label in ES_UPGRADE_ORDER}
+    keys = [k for k, _, _ in ES_UPGRADE_ORDER if k in NODES]
+    for k in NODES:
+        if k.startswith("es") and k not in keys:
+            keys.insert(0, k)
+            labels.setdefault(k, (k, f"Upgrade ES {k}"))
+
+    master_key = None
+    for r in cat_nodes(es, auth):
+        if r.get("master") != "*":
+            continue
+        name = (r.get("name") or "").lower()
+        for k, (_, fqdn) in NODES.items():
+            if not k.startswith("es"):
+                continue
+            if fqdn.split(".")[0].lower() in name or fqdn.lower() in name:
+                master_key = k
+                break
+    if master_key and master_key in keys:
+        keys = [k for k in keys if k != master_key] + [master_key]
+    return [(k, *labels.get(k, (k, f"Upgrade ES {k}"))) for k in keys]
 
 
 def node_reports_version(es, auth: str, fqdn: str, version: str) -> bool:
@@ -133,9 +176,14 @@ def upgrade_es_cluster(version: str, elastic_pwd: str) -> None:
     print(f"\n=== Elasticsearch rolling upgrade -> {version} ===", flush=True)
     auth = curl_elastic_auth(elastic_pwd)
     es_primary = connect(NODES["es01"][0])
+    order = es_keys_master_last(es_primary, auth)
+    print(f"  order: {[k for k, _, _ in order]}", flush=True)
 
-    for key, tier, label in ES_UPGRADE_ORDER:
+    for key, _tier, label in order:
         ip, fqdn = NODES[key]
+        if node_already_on_version(es_primary, auth, fqdn, version):
+            print(f"SKIP {label}: already on {version}", flush=True)
+            continue
         print(f"\n--- {label} ({fqdn}) ---", flush=True)
         c = connect(ip)
         stage_packages(c, roles=("elasticsearch",), versions=(version,))
@@ -163,7 +211,7 @@ def upgrade_es_cluster(version: str, elastic_pwd: str) -> None:
         es_primary.close()
         raise RuntimeError(f"Not all nodes on {version} after rolling upgrade:\n{out}")
     es_primary.close()
-    print(f"OK all ES nodes on {version}", flush=True)
+    print(f"OK all {EXPECTED_ES_NODES} ES nodes on {version}", flush=True)
 
 
 def upgrade_kibana(version: str) -> None:
@@ -201,7 +249,36 @@ def verify_final(elastic_pwd: str) -> bool:
     return ok
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Rolling-upgrade ism-elk-cluster")
+    p.add_argument(
+        "--to",
+        choices=(INTERMEDIATE_VERSION, TARGET_VERSION),
+        default=INTERMEDIATE_VERSION,
+        help=f"Stop at this version (default {INTERMEDIATE_VERSION}; do not jump 8.18 -> 9.x)",
+    )
+    p.add_argument("--skip-es", action="store_true")
+    p.add_argument("--skip-kibana", action="store_true")
+    p.add_argument("--skip-agents", action="store_true")
+    return p.parse_args(argv)
+
+
+def require_819_before_9(es, auth: str, target: str) -> None:
+    if not target.startswith("9."):
+        return
+    rows = cat_nodes(es, auth)
+    bad = [r for r in rows if not str(r.get("version", "")).startswith("8.19")]
+    if len(rows) != EXPECTED_ES_NODES or bad:
+        vers = {r.get("name"): r.get("version") for r in rows}
+        raise RuntimeError(
+            f"9.x upgrade requires all {EXPECTED_ES_NODES} ES nodes on 8.19.x first; "
+            f"seen={vers}"
+        )
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    target = args.to
     print("=== Pre-upgrade cluster config snapshot ===", flush=True)
     scan_cluster_config()
 
@@ -209,21 +286,33 @@ def main() -> int:
     elastic_pwd = get_elastic_password(es)
     auth = curl_elastic_auth(elastic_pwd)
     print(run(es, f"curl -sk -u {auth} 'https://localhost:9200/_cat/nodes?v&h=name,version,master'", check=False))
+    require_819_before_9(es, auth, target)
     es.close()
 
-    print(f"\nHyper-V checkpoint: {SNAPSHOT_NAME} (all 5 VMs)", flush=True)
+    print(f"\nHyper-V checkpoint suggested: {SNAPSHOT_NAME} (all 6 VMs)", flush=True)
     print(
-        "Upgrade path: 8.18.4 -> "
-        f"{INTERMEDIATE_VERSION} (required for 9.4+) -> {TARGET_VERSION}",
+        f"Upgrade path: {BASELINE_VERSION} -> {INTERMEDIATE_VERSION} "
+        f"(required for 9.1+) -> {TARGET_VERSION}",
         flush=True,
     )
+    print(f"This run --to {target}", flush=True)
 
-    upgrade_es_cluster(INTERMEDIATE_VERSION, elastic_pwd)
-    upgrade_es_cluster(TARGET_VERSION, elastic_pwd)
-    upgrade_kibana(TARGET_VERSION)
-    if not upgrade_fleet_managed_agents(TARGET_VERSION, elastic_pwd):
-        print("WARN: agent upgrade incomplete", flush=True)
-        return 1
+    if not args.skip_es:
+        upgrade_es_cluster(target, elastic_pwd)
+    else:
+        print("SKIP Elasticsearch", flush=True)
+
+    if not args.skip_kibana:
+        upgrade_kibana(target)
+    else:
+        print("SKIP Kibana", flush=True)
+
+    if not args.skip_agents:
+        if not upgrade_fleet_managed_agents(target, elastic_pwd):
+            print("WARN: agent upgrade incomplete", flush=True)
+            return 1
+    else:
+        print("SKIP agents", flush=True)
 
     print("\n=== Post-upgrade verification ===", flush=True)
     issues = scan_cluster_config()
@@ -232,7 +321,7 @@ def main() -> int:
         return 1
     if issues:
         print(f"WARN: cluster_config_snapshot issues={issues}", flush=True)
-    print(f"\nSUCCESS: stack upgraded to {TARGET_VERSION}", flush=True)
+    print(f"\nSUCCESS: stack upgraded to {target}", flush=True)
     return 0
 
 

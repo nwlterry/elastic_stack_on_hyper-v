@@ -28,5 +28,6 @@ install_elastic_rpm_local() {
     echo "${pkg}-${version} already installed"
     return 0
   fi
-  dnf install -y "$rpm_file"
+  # Air-gapped VMs often have a stale RHEL DVD repo; never hit remotes for local RPMs.
+  dnf install -y --disablerepo='*' "$rpm_file"
 }

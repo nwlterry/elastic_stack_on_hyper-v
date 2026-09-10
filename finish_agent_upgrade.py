@@ -19,7 +19,7 @@ from deploy_ordered_stack import (
     set_fleet_vm_memory,
     wait_fleet_server_ready,
 )
-from upgrade_elastic_stack import TARGET_VERSION, stage_packages
+from upgrade_elastic_stack import INTERMEDIATE_VERSION, TARGET_VERSION, stage_packages
 
 FLEET_POLICY_ID = "9be39452-a297-4b8b-9fae-b12ab3cb9315"
 
@@ -99,7 +99,9 @@ def verify_agents(version: str, elastic_pwd: str) -> bool:
     print(out, flush=True)
 
     ok = True
-    for key in ("fleet", "es01", "es02", "es03", "kibana"):
+    for key in ("fleet", "es01", "es02", "es03", "es04", "kibana"):
+        if key not in NODES:
+            continue
         ip, fqdn = NODES[key]
         c = connect(ip)
         ver = run(
@@ -116,7 +118,16 @@ def verify_agents(version: str, elastic_pwd: str) -> bool:
 
 
 def main() -> int:
-    version = TARGET_VERSION
+    import argparse
+
+    p = argparse.ArgumentParser()
+    p.add_argument(
+        "--version",
+        default=INTERMEDIATE_VERSION,
+        help=f"Agent version (default {INTERMEDIATE_VERSION}; {TARGET_VERSION} after ES/Kibana 9.x)",
+    )
+    args = p.parse_args()
+    version = args.version
     es = connect(NODES["es01"][0])
     elastic_pwd = get_elastic_password(es)
     es.close()

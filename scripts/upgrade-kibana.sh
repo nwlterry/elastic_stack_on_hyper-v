@@ -26,7 +26,7 @@ echo "=== Install kibana-${VERSION} ==="
 # shellcheck source=elastic-rpm-install.sh
 source "$(dirname "$0")/elastic-rpm-install.sh"
 import_elastic_gpg || true
-dnf install -y "$RPM"
+dnf install -y --disablerepo='*' "$RPM"
 
 echo "=== Start Kibana ==="
 systemctl start kibana.service

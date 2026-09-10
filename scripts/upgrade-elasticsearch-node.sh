@@ -53,7 +53,7 @@ echo "=== Install elasticsearch-${VERSION} ==="
 # shellcheck source=elastic-rpm-install.sh
 source "$(dirname "$0")/elastic-rpm-install.sh"
 import_elastic_gpg || true
-dnf install -y "$RPM"
+dnf install -y --disablerepo='*' "$RPM"
 
 echo "=== Start Elasticsearch ==="
 systemctl start elasticsearch.service

@@ -17,7 +17,13 @@
 
     # Elastic Stack
     ClusterName        = 'ism-elk-cluster'
+    # Bootstrap / kickstart version. Live upgrades:
+    #   python upgrade_elastic_stack.py --to 8.19.18
+    #   python prepare_upgrade_9_5_3.py
+    #   python upgrade_elastic_stack.py --to 9.5.3
     ElasticVersion     = '8.18.4'
+    UpgradeIntermediate = '8.19.18'
+    UpgradeTarget      = '9.5.3'
     # Optional: set after first bootstrap (or use secrets/elastic-password locally).
     # Scripts never reset this unless you run reset_elastic_password.py.
     ElasticPassword    = 'CHANGE_ME_elastic_password'
@@ -51,6 +57,16 @@
             VMName         = 'ISMELKESNODE03'
             Hostname       = 'ismelkesnode03'
             IPAddress      = '10.44.40.33'
+            Role           = 'elasticsearch'
+            MemoryGB       = 8
+            ProcessorCount = 4
+            OSDiskGB       = 127
+            DataDiskGB     = 500
+        },
+        @{
+            VMName         = 'ISMELKESNODE04'
+            Hostname       = 'ismelkesnode04'
+            IPAddress      = '10.44.40.34'
             Role           = 'elasticsearch'
             MemoryGB       = 8
             ProcessorCount = 4
