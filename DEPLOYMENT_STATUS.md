@@ -1,21 +1,21 @@
-# Deployment Status — ism-elk-cluster (2026-09-10)
+# Deployment Status — ism-elk-cluster (2026-09-11)
 
 ## Stack overview
 
 | Component | FQDN | IP | Status |
 |-----------|------|-----|--------|
-| Elasticsearch es01 | ismelkesnode01.ocplab.net | 10.44.40.31 | **8.19.18** — master, data_content (elected master after roll) |
-| Elasticsearch es02 | ismelkesnode02.ocplab.net | 10.44.40.32 | **8.19.18** — master, data_content |
-| Elasticsearch es03 | ismelkesnode03.ocplab.net | 10.44.40.33 | **8.19.18** — master, data_content, **data_hot** |
-| Elasticsearch es04 | ismelkesnode04.ocplab.net | 10.44.40.34 | **8.19.18** — data_hot, ingest, remote, transform |
-| Kibana | ismelkkbnnode01.ocplab.net | 10.44.40.41 | **8.19.18** — `/api/status` available |
-| Fleet Server | ismelkflnode01.ocplab.net | 10.44.40.42 | Fleet + lab APM Server on :8200 |
+| Elasticsearch es01 | ismelkesnode01.ocplab.net | 10.44.40.31 | **9.5.3** — master, data_content |
+| Elasticsearch es02 | ismelkesnode02.ocplab.net | 10.44.40.32 | **9.5.3** — master, data_content |
+| Elasticsearch es03 | ismelkesnode03.ocplab.net | 10.44.40.33 | **9.5.3** — master, data_content, **data_hot** (elected master after 9.5.3 roll) |
+| Elasticsearch es04 | ismelkesnode04.ocplab.net | 10.44.40.34 | **9.5.3** — data_hot, ingest, remote, transform |
+| Kibana | ismelkkbnnode01.ocplab.net | 10.44.40.41 | **9.5.3** — `/api/status` available |
+| Fleet Server | ismelkflnode01.ocplab.net | 10.44.40.42 | **9.5.3** Fleet + lab APM Server on :8200 (VM started at 4 GB RAM) |
 
 - **Cluster:** `ism-elk-cluster` (4 ES nodes joined)
-- **Health:** **green** after aligning all ES nodes on **8.19.18** (220 primaries, 336 shards). Mixed 8.18.4/8.19.18 yellow is resolved.
-- **Snapshot repo:** `fs_nfs_snapshots` (re-registered 2026-09-10 after es02/es03 lost the NFS mount)
+- **Health:** **green** (4 nodes, 0 unassigned primaries) on **9.5.3**
+- **Snapshot repo:** `fs_nfs_snapshots` — **only** snapshot `pre-upgrade-to-9.5.3` (SUCCESS)
 - **Install method:** RPM (ES/Kibana); tar.gz (Fleet Server + agents)
-- **Current lab path:** full stack **8.19.18**. Next major: **9.5.3** (`docs/LAB_OPS_9_5_3.md`). Bootstrap remains 8.18.4.
+- **Current lab path:** full stack **9.5.3**. Bootstrap remains 8.18.4. Procedure: `docs/LAB_OPS_9_5_3.md`.
 
 ## Access URLs
 
@@ -30,12 +30,12 @@ Elastic password: `secrets/elastic-password` or `python show_elastic_password.py
 
 ## Recent lab milestones (September 2026)
 
-1. **2026-09-10:** Rolling-upgraded remaining ES nodes (es01–es03) from 8.18.4 → **8.19.18**; es04 was already 8.19.18. Cluster went **green**. Kibana RPM **8.19.18**.
-2. NFS `fs_nfs_snapshots` was disabled (`index-13` / master verify failed) because **es02 and es03 had no NFS mount**. Fix: `python remount_es_nfs.py` then `python create_named_snapshot.py --reregister --name pre-upgrade-to-8.19.18-20260910`.
-3. Local RPM upgrades must use `dnf install --disablerepo='*'` — stale `rhel-dvd-local.repo` otherwise fails after ES is already stopped.
-4. Offline packages for **8.19.18** and **9.5.3** in `packages/` (`python download_upgrade_packages.py`).
-5. 9.5.3 is **prepared, not executed**. Run `python prepare_upgrade_9_5_3.py` then Upgrade Assistant before `python upgrade_elastic_stack.py --to 9.5.3`.
-6. Fleet API currently reports **0 enrolled agents** (policies still present). `bulk_upgrade` needs a healthy Fleet Server enrollment first (`finish_agent_upgrade.py --version 8.19.18`). es04 agent binary was missing before this wave.
+1. **2026-09-11:** Upgraded full stack **8.19.18 → 9.5.3**. NFS snapshots pruned to only `pre-upgrade-to-9.5.3`. Procedure and gotchas: [docs/LAB_OPS_9_5_3.md](docs/LAB_OPS_9_5_3.md).
+2. **2026-09-11:** ES 9.x refuses `tracing.apm.*` in `elasticsearch.yml` — strip before start. Fleet `bulk_upgrade` to 9.x is blocked until Fleet Server is on 9.x; re-enroll Fleet Server first. Kibana 9 Fleet token API is `/api/fleet/enrollment_api_keys`.
+3. **2026-09-10:** Rolling-upgraded remaining ES nodes (es01–es03) from 8.18.4 → **8.19.18**; es04 was already 8.19.18. Cluster went **green**. Kibana RPM **8.19.18**. Fleet + agents later re-enrolled at 8.19.18.
+4. NFS `fs_nfs_snapshots` was disabled (`index-13` / master verify failed) because **es02 and es03 had no NFS mount**. Fix: `python remount_es_nfs.py` then `python create_named_snapshot.py --reregister --name <name>`.
+5. Local RPM upgrades must use `dnf install --disablerepo='*'` — stale `rhel-dvd-local.repo` otherwise fails after ES is already stopped.
+6. Offline packages for **8.19.18** and **9.5.3** in `packages/` (`python download_upgrade_packages.py`).
 
 July 2026 history (mixed-version / downgrade / APM) remains in [docs/LAB_OPS_8_18_8_19.md](docs/LAB_OPS_8_18_8_19.md).
 
@@ -59,8 +59,10 @@ Python elevation wrappers: `run_hv_snap_elevated.py`, `run_hv_retake_post81918.p
 | ES-only timed roll → 8.19.18 | `python upgrade_es_to_8_19_18.py` |
 | Remount NFS snapshot share | `python remount_es_nfs.py` |
 | NFS snapshot (no deletes) | `python create_named_snapshot.py --reregister --name <name>` |
+| Keep only one NFS snapshot | `python prune_nfs_snapshots_keep.py --keep pre-upgrade-to-9.5.3` |
 | 9.5.3 preflight | `python prepare_upgrade_9_5_3.py` |
 | 9.5.3 roll (after Assistant) | `python upgrade_elastic_stack.py --to 9.5.3` |
+| Re-enroll Fleet + agents at a version | `python reenroll_fleet_and_agents.py --version 9.5.3` |
 | Per-node 8.18.4 RPM path | `scripts/downgrade-es-node-8184.sh` |
 | Full downgrade + snapshot restore | `python complete_downgrade_restore.py` |
 | Reduce yellow (mixed version) | `python fix_yellow_mixed_version.py` |

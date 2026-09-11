@@ -60,7 +60,7 @@ def setup_artifact_server(fleet_ip: str, version: str, pkg_dir: Path | None = No
     rel_dir = f"{ARTIFACT_ROOT}/beats/elastic-agent"
 
     c = connect(fleet_ip)
-    copy_scripts(c, roles=("elastic-agent",))
+    copy_scripts(c, roles=("elastic-agent",), versions=(version,), copy_packages=False)
     run(c, f"mkdir -p {rel_dir}", check=False)
 
     from scp import SCPClient
@@ -165,11 +165,16 @@ def list_agents(kb, elastic_pwd: str) -> list[dict]:
 
 
 def agents_for_hostname(agents: list[dict], hostname: str) -> list[dict]:
-    return [
-        a
-        for a in agents
-        if a.get("local_metadata", {}).get("host", {}).get("hostname") == hostname
-    ]
+    want = {hostname.lower(), hostname.split(".")[0].lower()}
+    matched = []
+    for a in agents:
+        host = (
+            (a.get("local_metadata") or {}).get("host") or {}
+        )
+        reported = (host.get("hostname") or host.get("name") or "").lower()
+        if reported in want or reported.split(".")[0] in want:
+            matched.append(a)
+    return matched
 
 
 def unenroll_agents(
@@ -364,6 +369,7 @@ def reenroll_fleet_server_inplace(
     agent_version: str,
     fleet_ip: str | None = None,
     es_fqdn: str | None = None,
+    skip_vm_memory: bool = False,
 ) -> bool:
     """
     Re-enroll Fleet Server using the local agent archive on the Fleet VM.
@@ -389,12 +395,21 @@ def reenroll_fleet_server_inplace(
 
     from deploy_ordered_stack import FLEET_VM, ensure_vm_running
 
-    set_fleet_vm_memory()
-    ensure_vm_running(FLEET_VM, 30)
+    if skip_vm_memory:
+        print("Skipping Fleet VM memory reset (leave VM running)", flush=True)
+    else:
+        set_fleet_vm_memory()
+        ensure_vm_running(FLEET_VM, 30)
     svc_token, ca = create_service_token(elastic_pwd)
     c = connect(fleet_ip, attempts=60)
     stage_packages(c, roles=("elastic-agent",), versions=(agent_version,))
     run(c, AGENT_CLEANUP, check=False, timeout=300)
+    run(
+        c,
+        "rm -f /var/run/elastic-fleet-install.lock; "
+        ": > /var/log/fleet-install.log; : > /var/log/fleet-reenroll.log",
+        check=False,
+    )
     install_es_ca_on_node(c, ca)
     run(
         c,
@@ -403,7 +418,7 @@ def reenroll_fleet_server_inplace(
         f"--ca-file {REMOTE}/certs/http_ca.crt "
         f"--service-token {shlex.quote(svc_token)} "
         f"--policy-id {shlex.quote(policy_id)} "
-        f"> /var/log/fleet-reenroll.log 2>&1 &",
+        f"> /var/log/fleet-install.log 2>&1 &",
         timeout=30,
     )
     c.close()

@@ -104,12 +104,13 @@ def verify_agents(version: str, elastic_pwd: str) -> bool:
             continue
         ip, fqdn = NODES[key]
         c = connect(ip)
-        ver = run(
+        lines = run(
             c,
             "/opt/Elastic/Agent/elastic-agent version --binary-only 2>/dev/null | "
-            f"grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -1 || echo missing",
+            "grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -1 || echo missing",
             check=False,
-        ).strip().splitlines()[-1]
+        ).strip().splitlines()
+        ver = lines[-1] if lines else "missing"
         c.close()
         print(f"  {fqdn}: binary={ver}", flush=True)
         if ver != version:

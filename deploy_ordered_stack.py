@@ -45,20 +45,18 @@ VM_NAMES = _ctx["VM_NAMES"]
 os.environ["SSH_PASS"] = PASSWORD
 
 AGENT_CLEANUP = (
-    "pkill -9 -f install-fleet-server 2>/dev/null; "
-    "pkill -9 -f 'fleet-server' 2>/dev/null; "
-    "pkill -9 -f '/opt/Elastic/Agent' 2>/dev/null; "
-    "pkill -9 -f '/opt/elastic-setup/archives/elastic-agent' 2>/dev/null; "
-    "pkill -9 -f elastic-agent 2>/dev/null; "
     "systemctl stop elastic-agent 2>/dev/null; "
     "systemctl disable elastic-agent 2>/dev/null; "
     "command -v elastic-agent >/dev/null && elastic-agent uninstall --force 2>/dev/null; "
     "/opt/Elastic/Agent/elastic-agent uninstall --force 2>/dev/null; "
-    f"rpm -e elastic-agent-{VERSION} 2>/dev/null; "
-    "rm -f /etc/systemd/system/elastic-agent.service; "
+    "pkill -9 -f '/opt/Elastic/Agent' 2>/dev/null; "
+    "pkill -9 -f '/usr/share/elastic-agent' 2>/dev/null; "
+    "pkill -9 -f '/usr/bin/elastic-agent' 2>/dev/null; "
+    "rpm -qa | awk '/^elastic-agent-/{print}' | xargs -r rpm -e; "
+    "rm -f /etc/systemd/system/elastic-agent.service /usr/lib/systemd/system/elastic-agent.service; "
     "rm -rf /etc/systemd/system/elastic-agent.service.d; "
     "systemctl daemon-reload 2>/dev/null; "
-    "rm -rf /opt/Elastic /var/lib/elastic-agent /etc/elastic-agent; true"
+    "rm -rf /opt/Elastic /var/lib/elastic-agent /etc/elastic-agent /usr/share/elastic-agent /usr/bin/elastic-agent; true"
 )
 
 
@@ -87,21 +85,49 @@ def connect(ip: str, attempts: int = 40) -> paramiko.SSHClient:
     raise RuntimeError(f"SSH failed: {ip}")
 
 
-def run(c, cmd, check=True, timeout=900) -> str:
-    print(f"  $ {cmd[:110]}..." if len(cmd) > 110 else f"  $ {cmd}", flush=True)
+def _redact_cmd(cmd: str) -> str:
+    cmd = re.sub(r"ELASTIC_PASS=\S+", "ELASTIC_PASS=***", cmd)
+    cmd = re.sub(r"MONITORING_PASS=\S+", "MONITORING_PASS=***", cmd)
+    cmd = re.sub(r"--service-token\s+\S+", "--service-token ***", cmd)
+    cmd = re.sub(r"--enrollment-token\s+\S+", "--enrollment-token ***", cmd)
+    cmd = re.sub(r"--es-auth\s+\S+", "--es-auth ***", cmd)
+    cmd = re.sub(r"-u\s+'[^']*'", "-u '***'", cmd)
+    cmd = re.sub(r'-u\s+"[^"]*"', '-u "***"', cmd)
+    cmd = re.sub(r"-u\s+\S+", "-u ***", cmd)
+    cmd = re.sub(r"Authorization: Bearer \S+", "Authorization: Bearer ***", cmd)
+    return cmd
+
+
+def _pkg_version_ok(name: str, versions: tuple[str, ...]) -> bool:
+    if not versions:
+        return True
+    if name.startswith("GPG-KEY-"):
+        return True
+    return any(v in name for v in versions)
+
+
+def run(c, cmd, check=True, timeout=900, echo=True) -> str:
+    if echo:
+        shown = _redact_cmd(cmd)
+        print(f"  $ {shown[:110]}..." if len(shown) > 110 else f"  $ {shown}", flush=True)
     _, o, e = c.exec_command(cmd, timeout=timeout)
     out = o.read().decode()
     err = e.read().decode()
     code = o.channel.recv_exit_status()
     text = out + err
-    if text.strip():
+    if echo and text.strip():
         print(text[-2800:], flush=True)
     if check and code != 0:
         raise RuntimeError(f"FAIL({code}): {err or out}")
     return text
 
 
-def copy_scripts(c, roles: tuple[str, ...] = ("elasticsearch", "kibana", "elastic-agent")):
+def copy_scripts(
+    c,
+    roles: tuple[str, ...] = ("elasticsearch", "kibana", "elastic-agent"),
+    versions: tuple[str, ...] = (),
+    copy_packages: bool = True,
+):
     run(c, f"mkdir -p {REMOTE}/rpms {REMOTE}/archives", check=False)
     pkg_map = {
         "elasticsearch": ("elasticsearch", "GPG"),
@@ -125,17 +151,23 @@ def copy_scripts(c, roles: tuple[str, ...] = ("elasticsearch", "kibana", "elasti
                 for f in epr_local.glob("*.zip"):
                     scp.put(str(f), f"{REMOTE}/epr-packages/{f.name}")
                     scp.put(str(f), f"{REMOTE}/packages/epr/{f.name}")
-            for f in pkg.iterdir():
-                if not f.is_file():
-                    continue
-                name = f.name
-                if "elastic-agent" in roles and "elastic-agent" in name and (
-                    name.endswith(".tar.gz") or name.endswith(".zip")
-                ):
-                    scp.put(str(f), f"{REMOTE}/archives/{name}")
-                    continue
-                if any(k in name for role in roles for k in (pkg_map.get(role, ()))):
-                    scp.put(str(f), f"{REMOTE}/rpms/{name}")
+            if copy_packages:
+                for f in pkg.iterdir():
+                    if not f.is_file():
+                        continue
+                    name = f.name
+                    if not _pkg_version_ok(name, versions):
+                        continue
+                    if "elastic-agent" in roles and "elastic-agent" in name and (
+                        name.endswith(".tar.gz")
+                        or name.endswith(".zip")
+                        or name.endswith(".sha512")
+                        or name.endswith(".asc")
+                    ):
+                        scp.put(str(f), f"{REMOTE}/archives/{name}")
+                        continue
+                    if any(k in name for role in roles for k in (pkg_map.get(role, ()))):
+                        scp.put(str(f), f"{REMOTE}/rpms/{name}")
     run(c, f"chmod +x {REMOTE}/*.sh {REMOTE}/*.py 2>/dev/null; true", check=False)
 
 
@@ -202,8 +234,12 @@ def wait_es_api(c):
 
 
 def get_elastic_password(c) -> str:
-    """Read stored elastic password; never resets."""
-    return _resolve_elastic_password(c, run)
+    """Read stored elastic password; never resets. Do not echo lookup commands."""
+
+    def _quiet_run(client, cmd, check=True, timeout=900, echo=True):
+        return run(client, cmd, check=check, timeout=timeout, echo=False)
+
+    return _resolve_elastic_password(c, _quiet_run)
 
 
 def reset_elastic_password(c) -> str:
@@ -236,7 +272,7 @@ def ensure_fleet_epr_ready(elastic_pwd: str) -> None:
         raise RuntimeError("Kibana must be stable before Fleet EPR setup")
 
     c = connect(kb_ip)
-    copy_scripts(c, roles=("kibana",))
+    copy_scripts(c, roles=("kibana",), copy_packages=False)
     run(c, f"bash {REMOTE}/stage-epr-packages.sh", timeout=900, check=False)
     run(c, f"bash {REMOTE}/install-local-epr.sh", timeout=180, check=False)
     run(
@@ -476,7 +512,7 @@ def _run_fleet_setup(elastic_pwd: str, phase: str, monitoring_user: str = "", mo
         es.close()
 
     c = connect(ip)
-    copy_scripts(c, roles=("kibana",))
+    copy_scripts(c, roles=(), copy_packages=False)
     fleet_host = NODES["fleet"][1]
     kibana_fqdn = NODES["kibana"][1]
     out = run(
@@ -579,12 +615,12 @@ def wait_fleet_server_ready(ip: str, max_polls: int = 180) -> bool:
     """Wait until Fleet Server enrollment completes and port 8220 is healthy."""
     print("  Waiting for Fleet Server enrollment to complete (up to 90 min)...", flush=True)
     for i in range(max_polls):
-        time.sleep(30)
         try:
             c = connect(ip, attempts=6)
         except RuntimeError:
             if i % 4 == 0:
                 print(f"  poll {i}: fleet VM SSH not ready", flush=True)
+            time.sleep(30)
             continue
         text = run(
             c,
@@ -592,7 +628,8 @@ def wait_fleet_server_ready(ip: str, max_polls: int = 180) -> bool:
             "ss -tlnp | grep 8220 || echo NO_8220; "
             "systemctl is-active elastic-agent 2>&1; "
             "elastic-agent status 2>&1 | head -20; "
-            "tail -3 /var/log/fleet-install.log",
+            "tail -3 /var/log/fleet-install.log 2>/dev/null; "
+            "tail -3 /var/log/fleet-reenroll.log 2>/dev/null",
             check=False,
             timeout=60,
         )
@@ -605,8 +642,14 @@ def wait_fleet_server_ready(ip: str, max_polls: int = 180) -> bool:
         if port_up and agent_active and enroll_done and _fleet_enrollment_complete(text):
             print("  Fleet Server enrollment complete on 8220", flush=True)
             return True
-        if "Failed to Enroll" in text and "Waiting For Enroll" not in text and i > 8:
+        if (
+            "Failed to Enroll" in text
+            and "Waiting For Enroll" not in text
+            and i > 8
+            and not port_up
+        ):
             break
+        time.sleep(30)
     return False
 
 
@@ -673,8 +716,9 @@ def deploy_fleet_server(fleet_policy_id: str, svc_token: str, ca: str) -> bool:
     return wait_fleet_server_ready(ip)
 
 
-def deploy_agents(fleet_info: dict, ca: str):
+def deploy_agents(fleet_info: dict, ca: str, version: str | None = None):
     print("=== Phase 5: Elastic Agents on all nodes ===", flush=True)
+    agent_ver = version or VERSION
     kb_tok = fleet_info.get("KIBANA_ENROLLMENT_TOKEN", "")
     fleet_url = f"https://{NODES['fleet'][1]}:8220"
     es_fqdn = NODES["es01"][1]
@@ -686,11 +730,11 @@ def deploy_agents(fleet_info: dict, ca: str):
         if not es_tok:
             raise RuntimeError(f"Missing enrollment token for ES node {fqdn}")
         c = connect(ip)
-        copy_scripts(c, roles=("elastic-agent",))
+        copy_scripts(c, roles=("elastic-agent",), versions=(agent_ver,))
         install_es_ca_on_node(c, ca)
         run(
             c,
-            f"bash {REMOTE}/install-elastic-agent.sh --version {VERSION} "
+            f"bash {REMOTE}/install-elastic-agent.sh --version {shlex.quote(agent_ver)} "
             f"--fleet-url '{fleet_url}' --enrollment-token '{es_tok}' "
             f"--es-host {es_fqdn} {ca_arg}",
             check=False,
@@ -701,11 +745,11 @@ def deploy_agents(fleet_info: dict, ca: str):
 
     ip, fqdn = NODES["kibana"]
     c = connect(ip)
-    copy_scripts(c, roles=("elastic-agent",))
+    copy_scripts(c, roles=("elastic-agent",), versions=(agent_ver,))
     install_es_ca_on_node(c, ca)
     run(
         c,
-        f"bash {REMOTE}/install-elastic-agent.sh --version {VERSION} "
+        f"bash {REMOTE}/install-elastic-agent.sh --version {shlex.quote(agent_ver)} "
         f"--fleet-url '{fleet_url}' --enrollment-token '{kb_tok}' "
         f"--es-host {es_fqdn} {ca_arg}",
         check=False,

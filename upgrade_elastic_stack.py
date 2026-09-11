@@ -50,7 +50,7 @@ ES_UPGRADE_ORDER: list[tuple[str, str, str]] = [
 
 
 def stage_packages(c, roles: tuple[str, ...], versions: tuple[str, ...] = ()) -> None:
-    copy_scripts(c, roles=roles)
+    copy_scripts(c, roles=roles, versions=versions, copy_packages=False)
     pkg = ROOT / "packages"
     if not pkg.is_dir():
         raise FileNotFoundError(f"Missing {pkg} — run download_upgrade_packages.py first")
@@ -99,9 +99,17 @@ def wait_cluster_green(es, auth: str, timeout: int = 900) -> bool:
     while time.time() < deadline:
         health = cluster_health(es, auth)
         status = health.get("status", "")
-        print(f"  cluster status={status} nodes={health.get('number_of_nodes')}", flush=True)
-        if status in ("green", "yellow") and health.get("relocating_shards", 1) == 0:
-            return True
+        reloc = health.get("relocating_shards", 1)
+        uprim = health.get("unassigned_primary_shards", 1)
+        print(
+            f"  cluster status={status} nodes={health.get('number_of_nodes')} "
+            f"reloc={reloc} unassigned_primary={uprim}",
+            flush=True,
+        )
+        # Mixed-version rolls can relocate while green; do not wait forever on reloc>0.
+        if status in ("green", "yellow") and uprim == 0:
+            if reloc == 0 or status == "green":
+                return True
         time.sleep(15)
     return False
 
@@ -267,11 +275,17 @@ def require_819_before_9(es, auth: str, target: str) -> None:
     if not target.startswith("9."):
         return
     rows = cat_nodes(es, auth)
-    bad = [r for r in rows if not str(r.get("version", "")).startswith("8.19")]
+    bad = [
+        r
+        for r in rows
+        if not (
+            str(r.get("version", "")).startswith("8.19") or r.get("version") == target
+        )
+    ]
     if len(rows) != EXPECTED_ES_NODES or bad:
         vers = {r.get("name"): r.get("version") for r in rows}
         raise RuntimeError(
-            f"9.x upgrade requires all {EXPECTED_ES_NODES} ES nodes on 8.19.x first; "
+            f"9.x upgrade requires all {EXPECTED_ES_NODES} ES nodes on 8.19.x or {target}; "
             f"seen={vers}"
         )
 

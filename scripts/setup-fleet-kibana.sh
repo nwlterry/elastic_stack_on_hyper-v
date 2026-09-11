@@ -332,8 +332,19 @@ def ensure_kibana_integration(policy_id, kb_fqdn):
 
 
 def enroll_token(policy_id):
-    r = api("POST", "/api/fleet/enrollment-api-keys", {"policy_id": policy_id})
-    return r["item"]["api_key"]
+    # Kibana 8.x used hyphenated path; 9.x Fleet API uses underscores.
+    last = None
+    for path in ("/api/fleet/enrollment_api_keys", "/api/fleet/enrollment-api-keys"):
+        try:
+            r = api("POST", path, {"policy_id": policy_id})
+            item = r.get("item") or r
+            token = item.get("api_key")
+            if token:
+                return token
+            last = r
+        except Exception as exc:
+            last = exc
+    raise RuntimeError(f"enrollment token failed: {last}")
 
 
 fleet_id = None

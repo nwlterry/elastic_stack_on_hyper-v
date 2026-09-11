@@ -55,6 +55,26 @@ source "$(dirname "$0")/elastic-rpm-install.sh"
 import_elastic_gpg || true
 dnf install -y --disablerepo='*' "$RPM"
 
+# ES 9.x refuses to boot with removed tracing.apm.* settings (ES-10293).
+if [[ "$VERSION" == 9.* ]]; then
+  echo "=== Strip tracing.apm.* (removed in ES 9) ==="
+  python3 - <<'PY'
+from pathlib import Path
+p = Path("/etc/elasticsearch/elasticsearch.yml")
+text = p.read_text()
+out, n = [], 0
+for line in text.splitlines(True):
+    if line.lstrip().startswith("tracing.apm"):
+        out.append("# removed for ES 9.x: " + line)
+        n += 1
+    else:
+        out.append(line)
+if n:
+    p.write_text("".join(out))
+print(f"stripped tracing.apm lines={n}")
+PY
+fi
+
 echo "=== Start Elasticsearch ==="
 systemctl start elasticsearch.service
 

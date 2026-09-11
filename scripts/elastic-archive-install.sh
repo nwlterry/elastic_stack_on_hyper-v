@@ -29,6 +29,7 @@ remove_elastic_agent() {
   if [[ -n "$version" ]]; then
     rpm -e "elastic-agent-${version}" 2>/dev/null || true
   fi
+  rpm -qa | awk '/^elastic-agent-/{print}' | xargs -r rpm -e 2>/dev/null || true
   pkill -9 -f '/var/lib/elastic-agent/data/elastic-agent' 2>/dev/null || true
   pkill -9 -f '/opt/Elastic/Agent' 2>/dev/null || true
   rm -rf /opt/Elastic /var/lib/elastic-agent /etc/elastic-agent
