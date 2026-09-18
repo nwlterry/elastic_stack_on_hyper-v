@@ -8,6 +8,24 @@ Automated deployment and upgrade of **Elasticsearch** (4 nodes), **Kibana**, **F
 | **[docs/LAB_OPS_8_18_8_19.md](docs/LAB_OPS_8_18_8_19.md)** | Full 8.18.4 ↔ 8.19.18 upgrade, HV snaps, APM, rejoin, yellow health |
 | **[docs/LAB_OPS_9_5_3.md](docs/LAB_OPS_9_5_3.md)** | Prepare and roll 8.19.18 → 9.5.3 (Upgrade Assistant, snaps, orchestrator) |
 
+
+## Repository layout
+
+Operational deploy/upgrade/Hyper-V scripts stay at the **repository root** (paths in this README are unchanged).
+
+| Path | Contents |
+| --- | --- |
+| `docs/` | Lab ops runbooks (`LAB_OPS_8_18_8_19.md`, `LAB_OPS_9_5_3.md`) |
+| `scripts/` | Remote shell installers (ES/Kibana/Fleet/agent, NFS) |
+| `tools/` | Diagnostics: `diag_*`, `check_*`, `test_*`, Fleet log helpers |
+| `kibana/` | Dashboard exports |
+| `kickstart/` | RHEL kickstart ISO helpers |
+| `logs/` | Local run logs (not all committed) |
+| `secrets/` | Local secrets (do not commit passwords) |
+| Root `*.py` / `*.ps1` | Deploy, upgrade, snapshot, Fleet, es04 rejoin |
+
+`DEPLOYMENT_STATUS.md` is the live verified stack state.
+
 ## Architecture
 
 ### VMs (6 total)
@@ -343,3 +361,7 @@ Fleet and agents trust the ES auto-configured CA via `scripts/elastic-agent-ca.s
 ## License
 
 Internal lab use. Elastic Stack is subject to [Elastic License](https://www.elastic.co/licensing/elastic-license).
+
+---
+
+See [GROUP.md](GROUP.md) for sibling repositories. Catalog: https://github.com/nwlterry/nwlterry
